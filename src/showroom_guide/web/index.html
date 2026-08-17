@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f8ff">
+  <title>新智惠想 · 展厅 AI 讲解</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="page-glow page-glow-primary" aria-hidden="true"></div>
+  <div class="page-glow page-glow-secondary" aria-hidden="true"></div>
+  <header class="brand-bar">
+    <a class="brand" href="#main-content" aria-label="新智惠想展厅 AI 讲解首页">
+      <img src="/static/xzinfra-logo.svg" alt="新智惠想">
+    </a>
+    <div class="brand-meta">
+      <span class="product-name">AI 展厅讲解</span>
+      <button class="new-conversation" id="new-conversation" type="button">新对话</button>
+      <div class="connection" id="connection" data-online="false">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span id="connection-text" aria-live="polite">正在连接</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="guide" id="main-content">
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow"><span aria-hidden="true"></span> XZINFRA SHOWROOM AI</p>
+      <h1 id="page-title">让每一次参观<br>都有 <em>AI</em> 讲解</h1>
+      <p class="lead">输入您正在了解的产品或展项，AI 将基于公司知识库，用简洁、准确的方式为您介绍。</p>
+      <div class="service-note">
+        <span class="service-dot" aria-hidden="true"></span>
+        <span>基于公司知识库回答</span>
+      </div>
+    </section>
+
+    <section class="interaction-card" aria-labelledby="question-title">
+      <div class="card-heading">
+        <div>
+          <p class="card-kicker">智能讲解服务</p>
+          <h2 id="question-title">想了解什么？</h2>
+        </div>
+        <div class="phase-pill" data-phase-indicator>
+          <span class="phase-dot" aria-hidden="true"></span>
+          <span id="phase">待机</span>
+        </div>
+      </div>
+
+      <p id="message" class="phase-message" aria-live="polite">输入问题开始讲解</p>
+
+      <form id="question-form">
+        <label class="sr-only" for="question">输入产品或展项问题</label>
+        <textarea id="question" name="question" rows="4" maxlength="500" placeholder="例如：请介绍星石 X1 智算机的核心能力" required></textarea>
+        <div class="form-footer">
+          <span id="character-count">0 / 500</span>
+          <button id="submit" type="submit">
+            <span>开始讲解</span>
+            <span class="button-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+      </form>
+
+      <p id="form-error" class="form-error" role="alert"></p>
+
+      <section class="answer-section" aria-labelledby="answer-title">
+        <div class="answer-heading">
+          <p id="answer-title">讲解内容</p>
+          <span>KNOWLEDGE GROUNDED</span>
+        </div>
+        <p id="answer" class="answer" aria-live="polite">讲解内容会在这里实时出现，并在语音准备好后自动播放。</p>
+        <div class="visitor-question">
+          <span>您的问题</span>
+          <p id="transcript">尚未提问</p>
+        </div>
+        <div class="audio-region">
+          <p id="audio-hint">语音准备好后可在这里控制播放。</p>
+          <audio id="audio" controls preload="none" hidden aria-describedby="audio-hint"></audio>
+        </div>
+      </section>
+
+      <p class="keyboard-hint">按 Ctrl / Command + Enter 快速提交</p>
+    </section>
+  </main>
+</body>
+</html>

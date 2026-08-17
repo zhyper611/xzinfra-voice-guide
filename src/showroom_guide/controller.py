@@ -1,0 +1,189 @@
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import AsyncIterator
+
+import httpx
+
+from showroom_guide.concurrency import AsyncGate, QueueWaitTimeout
+from showroom_guide.models import GuidePhase
+from showroom_guide.state import GuideStateStore
+
+
+@dataclass(frozen=True)
+class TextQuestionResult:
+    answer: str
+    audio: bytes | None
+    warning: str | None = None
+
+
+class QuestionInProgress(RuntimeError):
+    pass
+
+
+class GuideServiceUnavailable(RuntimeError):
+    def __init__(self, service: str) -> None:
+        self.service = service
+        super().__init__(f"{service} service unavailable")
+
+
+class UnlimitedGate:
+    @asynccontextmanager
+    async def slot(self, on_wait=None) -> AsyncIterator[None]:
+        yield
+
+
+class GuideController:
+    _MAX_ANSWER_CHARS = 320
+    _TRUNCATION_MARK = "……"
+    _SYSTEM_MESSAGE = (
+        "你是公司展厅讲解员。只依据知识库资料回答，先说结论，"
+        "回答适合口头播放且不超过320个汉字。资料不足时明确说资料未提供；"
+        "无法唯一确定产品或展项时只回答：您指的是哪个产品或展项？"
+    )
+    _UNANCHORED_REFERENCES = (
+        "这个",
+        "那个",
+        "它",
+        "该产品",
+        "该展项",
+        "这里",
+    )
+
+    def __init__(
+        self,
+        state,
+        xzkb,
+        speech_client,
+        xzkb_gate: AsyncGate | None = None,
+        tts_gate: AsyncGate | None = None,
+    ) -> None:
+        self._state: GuideStateStore = state
+        self._xzkb = xzkb
+        self._speech_client = speech_client
+        self._xzkb_gate = xzkb_gate or UnlimitedGate()
+        self._tts_gate = tts_gate or UnlimitedGate()
+        self._messages: list[dict[str, str]] = []
+        self._question_lock = asyncio.Lock()
+
+    @property
+    def is_busy(self) -> bool:
+        return self._question_lock.locked()
+
+    async def reset(self) -> None:
+        if self._question_lock.locked():
+            raise QuestionInProgress("问题正在处理中")
+        self._messages.clear()
+        await self._state.reset()
+
+    async def ask_text(self, question: str) -> TextQuestionResult:
+        normalized = question.strip()
+        if not normalized:
+            raise ValueError("问题不能为空")
+        if self._question_lock.locked():
+            raise QuestionInProgress("已有问题正在处理中")
+
+        async with self._question_lock:
+            return await self._ask_text_locked(normalized)
+
+    async def finish_playback(self) -> None:
+        if self._state.snapshot.phase in {
+            GuidePhase.SPEAKING,
+            GuidePhase.DEGRADED,
+            GuidePhase.ERROR,
+        }:
+            await self._state.transition(GuidePhase.IDLE)
+            await self._state.set_message("输入问题开始讲解")
+
+    async def _ask_text_locked(self, question: str) -> TextQuestionResult:
+        await self._state.start_text_question(question)
+        if self._needs_exhibit_clarification(question):
+            answer = "您指的是哪个产品或展项？"
+            await self._state.append_answer(answer)
+            return await self._synthesize_answer(answer)
+
+        request_messages = [
+            {"role": "system", "content": self._SYSTEM_MESSAGE},
+            *self._messages,
+            {"role": "user", "content": f"{question}\n/no_think"},
+        ]
+
+        try:
+            async with self._xzkb_gate.slot(
+                on_wait=lambda: self._state.set_message(
+                    "当前使用人数较多，正在排队查询资料"
+                )
+            ):
+                await self._state.set_message("正在查询展项资料")
+                for max_tokens in (None, 8000):
+                    stream = (
+                        self._xzkb.stream_chat(request_messages)
+                        if max_tokens is None
+                        else self._xzkb.stream_chat(
+                            request_messages,
+                            max_tokens=max_tokens,
+                        )
+                    )
+                    async for event in stream:
+                        combined = self._state.snapshot.answer + event.text
+                        if len(combined) > self._MAX_ANSWER_CHARS:
+                            content_limit = self._MAX_ANSWER_CHARS - len(
+                                self._TRUNCATION_MARK
+                            )
+                            bounded = (
+                                combined[:content_limit].rstrip()
+                                + self._TRUNCATION_MARK
+                            )
+                            await self._state.set_answer(bounded)
+                            break
+                        await self._state.append_answer(event.text)
+                    if self._state.snapshot.answer.strip():
+                        break
+                    await self._state.set_message(
+                        "知识库正在重新生成讲解内容"
+                    )
+        except QueueWaitTimeout as error:
+            await self._degrade("当前使用人数较多，请稍后重试")
+            raise GuideServiceUnavailable("capacity") from error
+        except (httpx.HTTPError, ValueError) as error:
+            await self._degrade("知识库暂时不可用，请稍后重试")
+            raise GuideServiceUnavailable("xzkb") from error
+
+        answer = self._state.snapshot.answer.strip()
+        if not answer:
+            await self._degrade("知识库没有返回有效答案，请换一种问法")
+            raise GuideServiceUnavailable("xzkb")
+
+        self._messages.extend(
+            [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer},
+            ]
+        )
+        self._messages = self._messages[-20:]
+        return await self._synthesize_answer(answer)
+
+    def _needs_exhibit_clarification(self, question: str) -> bool:
+        return not self._messages and any(
+            reference in question for reference in self._UNANCHORED_REFERENCES
+        )
+
+    async def _synthesize_answer(self, answer: str) -> TextQuestionResult:
+        try:
+            async with self._tts_gate.slot(
+                on_wait=lambda: self._state.set_message("正在排队生成语音")
+            ):
+                await self._state.set_message("正在生成讲解语音")
+                audio = await self._speech_client.synthesize(answer)
+        except (QueueWaitTimeout, httpx.HTTPError, ValueError):
+            warning = "语音暂时不可用，您仍可阅读文字答案"
+            await self._degrade(warning)
+            return TextQuestionResult(answer=answer, audio=None, warning=warning)
+
+        await self._state.transition(GuidePhase.SPEAKING)
+        await self._state.set_message("正在播放讲解")
+        return TextQuestionResult(answer=answer, audio=audio)
+
+    async def _degrade(self, message: str) -> None:
+        await self._state.transition(GuidePhase.DEGRADED)
+        await self._state.set_message(message)

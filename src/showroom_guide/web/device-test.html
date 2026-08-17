@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f8ff">
+  <title>树莓派语音链路测试 · 新智惠想</title>
+  <link rel="icon" href="/static/xzinfra-logo.svg">
+  <link rel="stylesheet" href="/static/device-test.css">
+  <script src="/static/device-test.js" defer></script>
+</head>
+<body>
+  <header class="brand-bar">
+    <a href="/" class="brand" aria-label="返回展厅 AI 讲解首页">
+      <img src="/static/xzinfra-logo.svg" alt="新智惠想">
+    </a>
+    <div class="environment"><span aria-hidden="true"></span>DEVICE LAB</div>
+  </header>
+
+  <main class="test-shell">
+    <header class="page-heading">
+      <p class="eyebrow">RASPBERRY PI VOICE PIPELINE</p>
+      <h1>树莓派语音链路测试</h1>
+      <p>上传设备标准 WAV，验证识别、知识库回答与语音合成。</p>
+    </header>
+
+    <div class="workspace">
+      <section class="control-panel" aria-labelledby="control-title">
+        <div class="section-heading">
+          <span>01</span>
+          <div><p>DEVICE ACCESS</p><h2 id="control-title">连接设备接口</h2></div>
+        </div>
+
+        <form id="device-form">
+          <label for="device-key">设备密钥</label>
+          <div class="secret-field">
+            <input id="device-key" name="device-key" type="password" autocomplete="off" spellcheck="false" required>
+            <button id="toggle-key" type="button" aria-label="显示设备密钥" aria-pressed="false">显示</button>
+          </div>
+
+          <label for="wav-file">测试音频</label>
+          <label class="drop-zone" id="drop-zone" for="wav-file">
+            <input id="wav-file" name="file" type="file" accept=".wav,audio/wav" required>
+            <strong id="file-name">选择或拖放 WAV 文件</strong>
+            <span>16 kHz · 单声道 · 16-bit PCM · 最大 10 MiB</span>
+          </label>
+
+          <div class="actions">
+            <button class="primary" id="run-test" type="submit"><span>开始测试</span><b aria-hidden="true">→</b></button>
+            <button class="secondary" id="reset-device" type="button">重置设备</button>
+          </div>
+        </form>
+        <p class="error" id="device-error" role="alert"></p>
+      </section>
+
+      <section class="result-panel" aria-labelledby="result-title">
+        <div class="section-heading">
+          <span>02</span>
+          <div><p>LIVE RESPONSE</p><h2 id="result-title">链路结果</h2></div>
+        </div>
+
+        <div class="status-line">
+          <div class="phase-pill" id="phase-pill" data-phase="idle"><i aria-hidden="true"></i><span id="phase">待机</span></div>
+          <p id="status-message" aria-live="polite">填写密钥后开始测试</p>
+        </div>
+
+        <div class="result-block"><p>ASR 识别文本</p><div id="transcript" aria-live="polite">尚未识别</div></div>
+        <div class="result-block answer-block"><p>知识库回答</p><div id="answer" aria-live="polite">回答会显示在这里</div></div>
+        <div class="audio-block">
+          <div><p>TTS 合成语音</p><span id="audio-hint">语音生成后可播放</span></div>
+          <audio id="device-audio" controls preload="none" hidden></audio>
+        </div>
+      </section>
+    </div>
+
+    <footer class="privacy-note"><span aria-hidden="true">●</span>密钥只保留在当前页面，刷新后自动清除</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[Unit]
+Description=XZInfra Showroom AI Guide
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/xzinfra-voice-guide
+EnvironmentFile=%h/.config/xzinfra-voice-guide/xzinfra-voice-guide.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/xzinfra-voice-guide/.venv/bin/python -m uvicorn showroom_guide.main:create_configured_app --factory --app-dir src --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

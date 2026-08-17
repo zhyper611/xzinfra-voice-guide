@@ -1,0 +1,38 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Runtime output
+output/
+*.log
+*.pid
+*.wav
+
+# Local development artifacts
+.planning/
+.superpowers/
+.playwright-cli/
+.worktrees/
+docs/superpowers/
+task_plan.md
+findings.md
+progress.md
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
