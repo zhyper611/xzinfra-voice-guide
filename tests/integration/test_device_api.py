@@ -41,6 +41,7 @@ class FakeDevice:
             return_value={
                 "window_size": 0,
                 "counts": {"success": 0, "degraded": 0, "error": 0},
+                "latest": None,
                 "metrics": {},
             }
         )
@@ -108,6 +109,11 @@ def test_device_metrics_returns_protected_read_only_snapshot():
     runtime.device.metrics_snapshot.return_value = {
         "window_size": 1,
         "counts": {"success": 1, "degraded": 2, "error": 3},
+        "latest": {
+            "recorded_at": "2026-08-18T01:02:03.456Z",
+            "turn_id": "latest-turn",
+            "outcome": "degraded",
+        },
         "metrics": {
             "asr_ms": {"samples": 1, "p50": 12.34, "p95": 12.34},
         },

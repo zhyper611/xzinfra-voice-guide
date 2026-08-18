@@ -123,7 +123,15 @@ curl -X POST http://127.0.0.1:8765/api/device/turn \
 ```powershell
 $key = ((Get-Content .env | Where-Object { $_ -match '^GUIDE_DEVICE_API_KEY=' }) -split '=', 2)[1]
 (Invoke-RestMethod -Headers @{'X-Device-Key'=$key} http://127.0.0.1:8765/api/device/metrics).metrics | Format-List
+
+$result = Invoke-RestMethod `
+    -Headers @{'X-Device-Key'=$key} `
+    http://127.0.0.1:8765/api/device/metrics
+
+$result.latest | Format-List
 ```
+
+device-test 页面会在每次问答后显示最近一次实际耗时。
 
 结果包含 ASR、知识库、TTS 和服务端总耗时的样本数、P50、P95；最多统计最近 500 次成功请求，服务重启后清空。
 

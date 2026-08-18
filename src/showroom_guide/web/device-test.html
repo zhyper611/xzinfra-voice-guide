@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#f5f8ff">
   <title>树莓派语音链路测试 · 新智惠想</title>
   <link rel="icon" href="/static/xzinfra-logo.svg">
-  <link rel="stylesheet" href="/static/device-test.css">
-  <script src="/static/device-test.js" defer></script>
+  <link rel="stylesheet" href="/static/device-test.css?v=20260818">
+  <script src="/static/device-test.js?v=20260818" defer></script>
 </head>
 <body>
   <header class="brand-bar">
@@ -69,6 +69,44 @@
         <div class="audio-block">
           <div><p>TTS 合成语音</p><span id="audio-hint">语音生成后可播放</span></div>
           <audio id="device-audio" controls preload="none" hidden></audio>
+        </div>
+      </section>
+
+      <section class="latency-panel" aria-labelledby="latency-title">
+        <div class="latency-topline">
+          <div class="section-heading">
+            <span>03</span>
+            <div><p>LATENCY TIMING</p><h2 id="latency-title">链路耗时</h2></div>
+          </div>
+          <div class="latency-controls">
+            <div class="latency-tabs" role="tablist" aria-label="链路耗时视图">
+              <button id="latency-current-tab" type="button" role="tab" aria-selected="true" aria-controls="latency-current-view">本次</button>
+              <button id="latency-stats-tab" type="button" role="tab" aria-selected="false" aria-controls="latency-stats-view">统计</button>
+            </div>
+            <button id="latency-refresh" class="latency-refresh" type="button" aria-label="刷新链路耗时" title="刷新链路耗时">↻</button>
+          </div>
+        </div>
+
+        <div id="latency-current-view" class="latency-view" role="tabpanel" aria-labelledby="latency-current-tab">
+          <p id="latency-empty" class="latency-empty">尚无链路耗时数据</p>
+          <div id="latency-current-content" hidden>
+            <div class="latency-summary">
+              <div><span>本次耗时</span><strong id="latency-outcome">--</strong></div>
+              <div><span>完成时间</span><strong id="latency-recorded-at">--</strong></div>
+              <div><span>服务端总耗时</span><strong id="latency-total">--</strong></div>
+            </div>
+            <p id="latency-failure" class="latency-failure" hidden></p>
+            <div id="latency-stages" class="latency-stages" aria-live="polite"></div>
+          </div>
+        </div>
+
+        <div id="latency-stats-view" class="latency-view" role="tabpanel" aria-labelledby="latency-stats-tab" hidden>
+          <div class="latency-table-wrap">
+            <table class="latency-table">
+              <thead><tr><th>阶段</th><th>样本数</th><th>P50</th><th>P95</th></tr></thead>
+              <tbody id="latency-stats-body"></tbody>
+            </table>
+          </div>
         </div>
       </section>
     </div>
