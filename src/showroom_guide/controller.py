@@ -38,11 +38,6 @@ class UnlimitedGate:
 class GuideController:
     _MAX_ANSWER_CHARS = 320
     _TRUNCATION_MARK = "……"
-    _SYSTEM_MESSAGE = (
-        "你是公司展厅讲解员。只依据知识库资料回答，先说结论，"
-        "回答适合口头播放且不超过320个汉字。资料不足时明确说资料未提供；"
-        "无法唯一确定产品或展项时只回答：您指的是哪个产品或展项？"
-    )
     _UNANCHORED_REFERENCES = (
         "这个",
         "那个",
@@ -113,7 +108,6 @@ class GuideController:
             return await self._synthesize_answer(answer, timing)
 
         request_messages = [
-            {"role": "system", "content": self._SYSTEM_MESSAGE},
             *self._messages,
             {"role": "user", "content": f"{question}\n/no_think"},
         ]

@@ -135,7 +135,7 @@ async def test_process_wav_preserves_follow_up_context():
     await session.finish_playback()
     await session.process_wav(make_wav())
 
-    assert xzkb.messages[1][1:] == [
+    assert xzkb.messages[1] == [
         {"role": "user", "content": "介绍展项甲"},
         {"role": "assistant", "content": "回答：介绍展项甲"},
         {"role": "user", "content": "它有什么特点？\n/no_think"},
@@ -209,6 +209,6 @@ async def test_finish_playback_and_reset_clear_device_state_and_audio():
         session.get_audio(first.audio_id)
 
     await session.process_wav(make_wav())
-    assert xzkb.messages[1][1:] == [
+    assert xzkb.messages[1] == [
         {"role": "user", "content": "介绍展项乙\n/no_think"}
     ]
