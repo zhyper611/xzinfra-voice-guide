@@ -97,6 +97,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         configured.xzkb_base_url,
         configured.xzkb_api_key.get_secret_value(),
         configured.request_timeout_seconds,
+        empty_search_response=configured.xzkb_empty_search_response,
     )
     speech = SpeechClient(
         configured.asr_base_url,

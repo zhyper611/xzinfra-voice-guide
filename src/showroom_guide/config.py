@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     xzkb_base_url: str = Field(min_length=1)
     xzkb_api_key: SecretStr = Field(min_length=8)
+    xzkb_empty_search_response: str = Field(min_length=1)
     asr_base_url: str = Field(min_length=1)
     asr_api_key: SecretStr = Field(min_length=8)
     asr_model: str = Field(min_length=1)
@@ -48,3 +49,11 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_base_url(cls, value: str) -> str:
         return value.rstrip("/")
+
+    @field_validator("xzkb_empty_search_response")
+    @classmethod
+    def normalize_empty_search_response(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("XZKB 空回复不能为空")
+        return normalized

@@ -17,8 +17,19 @@ class XzkbStreamMilestone(str, Enum):
     FIRST_SSE = "first_sse"
 
 
+class XzkbResponseError(ValueError):
+    pass
+
+
 class XzkbClient:
-    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float = 30.0,
+        *,
+        empty_search_response: str | None = None,
+    ) -> None:
         self._url = (
             f"{base_url.rstrip('/')}"
             "/kb-matrix/data-infra/v1/chat/completions"
@@ -26,6 +37,9 @@ class XzkbClient:
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"Authorization": f"Bearer {api_key}"},
+        )
+        self._empty_search_response = (
+            empty_search_response.strip() if empty_search_response else None
         )
 
     async def __aenter__(self) -> "XzkbClient":
@@ -66,6 +80,13 @@ class XzkbClient:
                 if payload == "[DONE]":
                     return
                 data = json.loads(payload)
+                error = data.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "").strip()
+                    if message and message == self._empty_search_response:
+                        yield ChatStreamEvent(text=message)
+                        return
+                    raise XzkbResponseError(message or "XZKB returned an error response")
                 choices = data.get("choices") or [{}]
                 delta = choices[0].get("delta") or {}
                 text = delta.get("content", "")
