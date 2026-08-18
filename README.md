@@ -63,6 +63,7 @@ chmod 600 .env
 | --- | --- |
 | `GUIDE_XZKB_BASE_URL` | XZKB 后端根地址；程序会追加知识库聊天路径 |
 | `GUIDE_XZKB_API_KEY` | XZKB API 密钥 |
+| `GUIDE_XZKB_EMPTY_SEARCH_RESPONSE` | 必须与 XZKB 应用中配置的空回复逐字一致；匹配时作为正常回答并合成语音 |
 | `GUIDE_ASR_BASE_URL` | 语音服务根地址；程序会追加 `/audio/transcriptions` |
 | `GUIDE_ASR_API_KEY` | ASR API 密钥 |
 | `GUIDE_ASR_MODEL` | ASR 模型名称 |

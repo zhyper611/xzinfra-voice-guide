@@ -118,6 +118,10 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert "URL.createObjectURL(audioBlob)" in response.text
     assert 'request("/api/device/playback-finished"' in response.text
     assert 'request("/api/device/reset"' in response.text
+    assert 'transcript.textContent = snapshot.transcript || "尚未识别"' in response.text
+    assert 'answer.textContent = snapshot.answer || "回答会显示在这里"' in response.text
+    assert "if (snapshot.transcript)" not in response.text
+    assert "if (snapshot.answer)" not in response.text
     assert "textContent" in response.text
     assert "function formatDuration" in response.text
     assert "function refreshMetrics" in response.text

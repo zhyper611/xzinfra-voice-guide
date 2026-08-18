@@ -120,8 +120,8 @@ function renderState(snapshot) {
   phasePill.dataset.phase = currentPhase;
   phase.textContent = phaseLabels[currentPhase] || "处理中";
   statusMessage.textContent = snapshot.message || "设备状态已更新";
-  if (snapshot.transcript) transcript.textContent = snapshot.transcript;
-  if (snapshot.answer) answer.textContent = snapshot.answer;
+  transcript.textContent = snapshot.transcript || "尚未识别";
+  answer.textContent = snapshot.answer || "回答会显示在这里";
 }
 
 function clearAudio() {

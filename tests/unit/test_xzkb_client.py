@@ -199,3 +199,72 @@ async def test_chat_can_override_max_tokens_for_empty_content_retry():
 
     assert [event.text for event in events] == ["回答"]
     assert json.loads(route.calls[0].request.content)["max_tokens"] == 8000
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_configured_empty_search_error_becomes_spoken_answer():
+    body = "\n".join(
+        [
+            'data: {"error":{"message":"请询问展厅相关内容。","type":"server_error","code":null}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    respx.post(
+        "http://xzkb.test/kb-matrix/data-infra/v1/chat/completions"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    async with XzkbClient(
+        "http://xzkb.test",
+        "device-key",
+        empty_search_response="请询问展厅相关内容。",
+    ) as client:
+        events = [
+            event
+            async for event in client.stream_chat(
+                [{"role": "user", "content": "无关问题"}]
+            )
+        ]
+
+    assert [event.text for event in events] == ["请询问展厅相关内容。"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_unexpected_xzkb_error_is_not_spoken():
+    body = "\n".join(
+        [
+            'data: {"error":{"message":"database unavailable","type":"server_error","code":null}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    respx.post(
+        "http://xzkb.test/kb-matrix/data-infra/v1/chat/completions"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    async with XzkbClient(
+        "http://xzkb.test",
+        "device-key",
+        empty_search_response="请询问展厅相关内容。",
+    ) as client:
+        with pytest.raises(ValueError, match="database unavailable"):
+            _ = [
+                event
+                async for event in client.stream_chat(
+                    [{"role": "user", "content": "问题"}]
+                )
+            ]
