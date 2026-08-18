@@ -109,7 +109,7 @@ class GuideController:
 
         request_messages = [
             *self._messages,
-            {"role": "user", "content": f"{question}\n/no_think"},
+            {"role": "user", "content": question},
         ]
 
         try:

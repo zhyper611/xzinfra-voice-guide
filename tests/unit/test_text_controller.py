@@ -68,12 +68,12 @@ async def test_text_question_preserves_conversation_context():
     assert second_messages == [
         {"role": "user", "content": "介绍展项甲"},
         {"role": "assistant", "content": "这是展项甲。"},
-        {"role": "user", "content": "它有什么特点？\n/no_think"},
+        {"role": "user", "content": "它有什么特点？"},
     ]
 
 
 @pytest.mark.asyncio
-async def test_current_model_request_disables_thinking_without_polluting_history():
+async def test_current_model_request_sends_question_unchanged():
     controller, _, xzkb, speech = make_controller()
     xzkb.stream_chat.side_effect = [
         async_events("第一个回答。"),
@@ -87,11 +87,9 @@ async def test_current_model_request_disables_thinking_without_polluting_history
 
     first_messages = xzkb.stream_chat.call_args_list[0].args[0]
     second_messages = xzkb.stream_chat.call_args_list[1].args[0]
-    assert first_messages == [
-        {"role": "user", "content": "介绍展项甲\n/no_think"}
-    ]
+    assert first_messages == [{"role": "user", "content": "介绍展项甲"}]
     assert second_messages[0]["content"] == "介绍展项甲"
-    assert second_messages[-1]["content"] == "它有什么特点？\n/no_think"
+    assert second_messages[-1]["content"] == "它有什么特点？"
 
 
 @pytest.mark.asyncio
@@ -221,7 +219,7 @@ async def test_reset_clears_conversation_context():
 
     second_messages = xzkb.stream_chat.call_args_list[1].args[0]
     assert second_messages == [
-        {"role": "user", "content": "介绍展项乙\n/no_think"},
+        {"role": "user", "content": "介绍展项乙"},
     ]
     assert state.snapshot.transcript == "介绍展项乙"
 

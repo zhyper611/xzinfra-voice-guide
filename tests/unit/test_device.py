@@ -40,7 +40,7 @@ class TrackingXzkb:
 
     async def stream_chat(self, messages, observer=None):
         self.messages.append([dict(item) for item in messages])
-        question = messages[-1]["content"].removesuffix("\n/no_think")
+        question = messages[-1]["content"]
         yield ChatStreamEvent(text=f"回答：{question}")
 
 
@@ -138,7 +138,7 @@ async def test_process_wav_preserves_follow_up_context():
     assert xzkb.messages[1] == [
         {"role": "user", "content": "介绍展项甲"},
         {"role": "assistant", "content": "回答：介绍展项甲"},
-        {"role": "user", "content": "它有什么特点？\n/no_think"},
+        {"role": "user", "content": "它有什么特点？"},
     ]
 
 
@@ -210,5 +210,5 @@ async def test_finish_playback_and_reset_clear_device_state_and_audio():
 
     await session.process_wav(make_wav())
     assert xzkb.messages[1] == [
-        {"role": "user", "content": "介绍展项乙\n/no_think"}
+        {"role": "user", "content": "介绍展项乙"}
     ]

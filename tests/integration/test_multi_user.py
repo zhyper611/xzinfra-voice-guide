@@ -34,7 +34,7 @@ class TrackingXzkb:
         self.maximum = max(self.maximum, self.active)
         try:
             await asyncio.sleep(0.02)
-            question = messages[-1]["content"].removesuffix("\n/no_think")
+            question = messages[-1]["content"]
             yield ChatStreamEvent(text=f"回答：{question}")
         finally:
             self.active -= 1
