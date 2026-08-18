@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 import httpx
 
+from showroom_guide.clients.xzkb import XzkbStreamMilestone
 from showroom_guide.concurrency import AsyncGate, QueueWaitTimeout
 from showroom_guide.latency import TurnTiming
 from showroom_guide.models import GuidePhase
@@ -128,16 +129,14 @@ class GuideController:
                 if timing is not None:
                     timing.enter_xzkb_slot()
                 await self._state.set_message("正在查询展项资料")
+                observer = self._xzkb_observer(timing)
                 for max_tokens in (None, 8000):
                     if timing is not None:
                         timing.start_xzkb_request()
-                    stream = (
-                        self._xzkb.stream_chat(request_messages)
-                        if max_tokens is None
-                        else self._xzkb.stream_chat(
-                            request_messages,
-                            max_tokens=max_tokens,
-                        )
+                    stream = self._start_xzkb_stream(
+                        request_messages,
+                        max_tokens,
+                        observer,
                     )
                     async for event in stream:
                         if timing is not None and event.text.strip():
@@ -194,6 +193,32 @@ class GuideController:
         return not self._messages and any(
             reference in question for reference in self._UNANCHORED_REFERENCES
         )
+
+    def _start_xzkb_stream(self, messages, max_tokens, observer):
+        if observer is None:
+            if max_tokens is None:
+                return self._xzkb.stream_chat(messages)
+            return self._xzkb.stream_chat(messages, max_tokens=max_tokens)
+        if max_tokens is None:
+            return self._xzkb.stream_chat(messages, observer=observer)
+        return self._xzkb.stream_chat(
+            messages,
+            max_tokens=max_tokens,
+            observer=observer,
+        )
+
+    @staticmethod
+    def _xzkb_observer(timing: TurnTiming | None):
+        if timing is None:
+            return None
+
+        def observe(milestone: XzkbStreamMilestone) -> None:
+            if milestone is XzkbStreamMilestone.RESPONSE_HEADERS:
+                timing.receive_xzkb_headers()
+            elif milestone is XzkbStreamMilestone.FIRST_SSE:
+                timing.receive_xzkb_first_sse()
+
+        return observe
 
     async def _synthesize_answer(
         self,

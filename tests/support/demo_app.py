@@ -25,7 +25,7 @@ def silent_wav() -> bytes:
 
 
 class DemoXzkb:
-    async def stream_chat(self, _messages):
+    async def stream_chat(self, _messages, observer=None):
         for text in ("这是一个界面演示。", "正式运行时，内容将来自公司知识库。"):
             await asyncio.sleep(0.25)
             yield ChatStreamEvent(text=text)

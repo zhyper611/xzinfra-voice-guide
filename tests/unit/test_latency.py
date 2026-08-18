@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from showroom_guide.audio_store import AudioStore
-from showroom_guide.clients.xzkb import ChatStreamEvent
+from showroom_guide.clients.xzkb import ChatStreamEvent, XzkbStreamMilestone
 from showroom_guide.concurrency import QueueWaitTimeout
 from showroom_guide.controller import GuideController, GuideServiceUnavailable
 from showroom_guide.device import DeviceTranscriptionUnavailable, DeviceVoiceSession
@@ -80,12 +80,22 @@ class TimedXzkb:
         self.retry_empty = retry_empty
         self.calls = 0
 
-    async def stream_chat(self, _messages, max_tokens=None):
+    async def stream_chat(self, _messages, max_tokens=None, observer=None):
         self.calls += 1
         if self.retry_empty and self.calls == 1:
-            self.clock.advance(0.01)
+            self.clock.advance(0.004)
+            if observer is not None:
+                observer(XzkbStreamMilestone.RESPONSE_HEADERS)
+            self.clock.advance(0.006)
+            if observer is not None:
+                observer(XzkbStreamMilestone.FIRST_SSE)
             return
-        self.clock.advance(0.02)
+        self.clock.advance(0.01)
+        if observer is not None:
+            observer(XzkbStreamMilestone.RESPONSE_HEADERS)
+        self.clock.advance(0.01)
+        if observer is not None:
+            observer(XzkbStreamMilestone.FIRST_SSE)
         yield ChatStreamEvent(text="answer")
         self.clock.advance(0.03)
         yield ChatStreamEvent(text=" more")
@@ -95,11 +105,52 @@ class WhitespaceThenTextXzkb:
     def __init__(self, clock: Clock) -> None:
         self.clock = clock
 
-    async def stream_chat(self, _messages, max_tokens=None):
-        self.clock.advance(0.01)
+    async def stream_chat(self, _messages, max_tokens=None, observer=None):
+        self.clock.advance(0.005)
+        if observer is not None:
+            observer(XzkbStreamMilestone.RESPONSE_HEADERS)
+        self.clock.advance(0.005)
+        if observer is not None:
+            observer(XzkbStreamMilestone.FIRST_SSE)
         yield ChatStreamEvent(text=" ")
         self.clock.advance(0.02)
         yield ChatStreamEvent(text="answer")
+
+
+class FailingBeforeHeadersXzkb:
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+
+    async def stream_chat(self, _messages, max_tokens=None, observer=None):
+        self.clock.advance(0.01)
+        raise httpx.ReadTimeout("timeout")
+        yield ChatStreamEvent(text="")
+
+
+class HeadersOnlyXzkb:
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+
+    async def stream_chat(self, _messages, max_tokens=None, observer=None):
+        self.clock.advance(0.01)
+        if observer is not None:
+            observer(XzkbStreamMilestone.RESPONSE_HEADERS)
+        if False:
+            yield ChatStreamEvent(text="")
+
+
+class SseWithoutContentXzkb:
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+
+    async def stream_chat(self, _messages, max_tokens=None, observer=None):
+        self.clock.advance(0.01)
+        if observer is not None:
+            observer(XzkbStreamMilestone.RESPONSE_HEADERS)
+        self.clock.advance(0.01)
+        if observer is not None:
+            observer(XzkbStreamMilestone.FIRST_SSE)
+        yield ChatStreamEvent(text=" ")
 
 
 def wav() -> bytes:
@@ -148,6 +199,9 @@ async def test_device_turn_records_stage_boundaries_without_queueing():
     metrics = recorder.snapshot()["metrics"]
     assert metrics["asr_ms"] == {"samples": 1, "p50": 10.0, "p95": 10.0}
     assert metrics["xzkb_queue_ms"] == {"samples": 1, "p50": 0.0, "p95": 0.0}
+    assert metrics["xzkb_headers_ms"] == {"samples": 1, "p50": 10.0, "p95": 10.0}
+    assert metrics["xzkb_first_sse_ms"] == {"samples": 1, "p50": 10.0, "p95": 10.0}
+    assert metrics["xzkb_first_content_ms"] == {"samples": 1, "p50": 0.0, "p95": 0.0}
     assert metrics["xzkb_ttft_ms"] == {"samples": 1, "p50": 20.0, "p95": 20.0}
     assert metrics["xzkb_generation_ms"] == {"samples": 1, "p50": 30.0, "p95": 30.0}
     assert metrics["xzkb_total_ms"] == {"samples": 1, "p50": 50.0, "p95": 50.0}
@@ -174,6 +228,9 @@ async def test_device_turn_records_gate_waits_and_empty_result_retry_ttft():
 
     metrics = recorder.snapshot()["metrics"]
     assert metrics["xzkb_queue_ms"]["p50"] == 7.0
+    assert metrics["xzkb_headers_ms"]["p50"] == 4.0
+    assert metrics["xzkb_first_sse_ms"]["p50"] == 6.0
+    assert metrics["xzkb_first_content_ms"]["p50"] == 20.0
     assert metrics["xzkb_ttft_ms"]["p50"] == 30.0
     assert metrics["tts_queue_ms"]["p50"] == 11.0
 
@@ -188,7 +245,35 @@ async def test_whitespace_stream_event_does_not_complete_xzkb_ttft():
 
     await controller.ask_text("question", timing=timing)
 
+    assert timing.xzkb_headers_ms == 5.0
+    assert timing.xzkb_first_sse_ms == 5.0
+    assert timing.xzkb_first_content_ms == pytest.approx(20.0)
     assert timing.xzkb_ttft_ms == 30.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("xzkb", "expected"),
+    [
+        (FailingBeforeHeadersXzkb, (None, None, None)),
+        (HeadersOnlyXzkb, (10.0, None, None)),
+        (SseWithoutContentXzkb, (10.0, 10.0, None)),
+    ],
+)
+async def test_missing_xzkb_milestones_remain_null(xzkb, expected):
+    clock = Clock()
+    state = GuideStateStore()
+    controller = GuideController(state, xzkb(clock), TimedSpeech(clock))
+    timing = TurnTiming(clock=clock)
+
+    with pytest.raises(GuideServiceUnavailable):
+        await controller.ask_text("question", timing=timing)
+
+    assert (
+        timing.xzkb_headers_ms,
+        timing.xzkb_first_sse_ms,
+        timing.xzkb_first_content_ms,
+    ) == expected
 
 
 @pytest.mark.asyncio
@@ -271,10 +356,16 @@ def test_recorder_emits_timing_log_at_warning_level(caplog):
     clock = Clock()
     recorder = DeviceLatencyRecorder()
     timing = TurnTiming(clock=clock)
+    timing.xzkb_headers_ms = 1.25
+    timing.xzkb_first_sse_ms = 2.5
+    timing.xzkb_first_content_ms = 3.75
     with caplog.at_level(logging.WARNING, logger="showroom_guide.latency"):
         recorder.record(timing, "error", complete_success=False)
 
     assert "device_turn_timing" in caplog.text
+    assert '"xzkb_headers_ms": 1.25' in caplog.text
+    assert '"xzkb_first_sse_ms": 2.5' in caplog.text
+    assert '"xzkb_first_content_ms": 3.75' in caplog.text
 
 
 def test_latency_recorder_caps_success_window_at_500_and_omits_empty_metrics():

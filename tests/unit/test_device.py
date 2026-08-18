@@ -38,7 +38,7 @@ class TrackingXzkb:
     def __init__(self) -> None:
         self.messages = []
 
-    async def stream_chat(self, messages):
+    async def stream_chat(self, messages, observer=None):
         self.messages.append([dict(item) for item in messages])
         question = messages[-1]["content"].removesuffix("\n/no_think")
         yield ChatStreamEvent(text=f"回答：{question}")

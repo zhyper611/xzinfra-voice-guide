@@ -1,6 +1,7 @@
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import httpx
@@ -9,6 +10,11 @@ import httpx
 @dataclass(frozen=True)
 class ChatStreamEvent:
     text: str
+
+
+class XzkbStreamMilestone(str, Enum):
+    RESPONSE_HEADERS = "response_headers"
+    FIRST_SSE = "first_sse"
 
 
 class XzkbClient:
@@ -35,6 +41,7 @@ class XzkbClient:
         self,
         messages: Sequence[dict[str, Any]],
         max_tokens: int | None = None,
+        observer: Callable[[XzkbStreamMilestone], None] | None = None,
     ) -> AsyncIterator[ChatStreamEvent]:
         payload = {"messages": list(messages), "stream": True}
         if max_tokens is not None:
@@ -45,9 +52,16 @@ class XzkbClient:
             json=payload,
         ) as response:
             response.raise_for_status()
+            if observer is not None:
+                observer(XzkbStreamMilestone.RESPONSE_HEADERS)
+            first_sse_seen = False
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
                     continue
+                if not first_sse_seen:
+                    first_sse_seen = True
+                    if observer is not None:
+                        observer(XzkbStreamMilestone.FIRST_SSE)
                 payload = line[5:].lstrip()
                 if payload == "[DONE]":
                     return

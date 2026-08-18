@@ -28,7 +28,7 @@ class TrackingXzkb:
         self.maximum = 0
         self.received_messages = []
 
-    async def stream_chat(self, messages):
+    async def stream_chat(self, messages, observer=None):
         self.received_messages.append([dict(item) for item in messages])
         self.active += 1
         self.maximum = max(self.maximum, self.active)

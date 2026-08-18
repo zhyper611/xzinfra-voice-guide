@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 METRIC_NAMES = (
     "asr_ms",
     "xzkb_queue_ms",
+    "xzkb_headers_ms",
+    "xzkb_first_sse_ms",
+    "xzkb_first_content_ms",
     "xzkb_ttft_ms",
     "xzkb_generation_ms",
     "xzkb_total_ms",
@@ -32,6 +35,9 @@ class TurnTiming:
     started_at: float = field(init=False)
     asr_ms: float | None = None
     xzkb_queue_ms: float | None = None
+    xzkb_headers_ms: float | None = None
+    xzkb_first_sse_ms: float | None = None
+    xzkb_first_content_ms: float | None = None
     xzkb_ttft_ms: float | None = None
     xzkb_generation_ms: float | None = None
     xzkb_total_ms: float | None = None
@@ -43,6 +49,8 @@ class TurnTiming:
     _asr_started_at: float | None = field(default=None, init=False)
     _xzkb_queue_started_at: float | None = field(default=None, init=False)
     _xzkb_started_at: float | None = field(default=None, init=False)
+    _xzkb_headers_at: float | None = field(default=None, init=False)
+    _xzkb_first_sse_at: float | None = field(default=None, init=False)
     _xzkb_first_text_at: float | None = field(default=None, init=False)
     _tts_queue_started_at: float | None = field(default=None, init=False)
     _tts_started_at: float | None = field(default=None, init=False)
@@ -81,11 +89,34 @@ class TurnTiming:
         if self._xzkb_started_at is None:
             self._xzkb_started_at = self.now()
 
+    def receive_xzkb_headers(self) -> None:
+        if self._xzkb_started_at is None or self._xzkb_headers_at is not None:
+            return
+        self._xzkb_headers_at = self.now()
+        self.xzkb_headers_ms = self._milliseconds(
+            self._xzkb_started_at,
+            self._xzkb_headers_at,
+        )
+
+    def receive_xzkb_first_sse(self) -> None:
+        if self._xzkb_headers_at is None or self._xzkb_first_sse_at is not None:
+            return
+        self._xzkb_first_sse_at = self.now()
+        self.xzkb_first_sse_ms = self._milliseconds(
+            self._xzkb_headers_at,
+            self._xzkb_first_sse_at,
+        )
+
     def receive_xzkb_text(self) -> None:
         if self._xzkb_started_at is None or self._xzkb_first_text_at is not None:
             return
         self._xzkb_first_text_at = self.now()
         self.xzkb_ttft_ms = self._milliseconds(self._xzkb_started_at, self._xzkb_first_text_at)
+        if self._xzkb_first_sse_at is not None:
+            self.xzkb_first_content_ms = self._milliseconds(
+                self._xzkb_first_sse_at,
+                self._xzkb_first_text_at,
+            )
 
     def finish_xzkb(self) -> None:
         if self._xzkb_started_at is None:
