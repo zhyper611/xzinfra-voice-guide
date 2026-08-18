@@ -6,6 +6,7 @@ from typing import AsyncIterator
 import httpx
 
 from showroom_guide.concurrency import AsyncGate, QueueWaitTimeout
+from showroom_guide.latency import TurnTiming
 from showroom_guide.models import GuidePhase
 from showroom_guide.state import GuideStateStore
 
@@ -76,7 +77,11 @@ class GuideController:
         self._messages.clear()
         await self._state.reset()
 
-    async def ask_text(self, question: str) -> TextQuestionResult:
+    async def ask_text(
+        self,
+        question: str,
+        timing: TurnTiming | None = None,
+    ) -> TextQuestionResult:
         normalized = question.strip()
         if not normalized:
             raise ValueError("问题不能为空")
@@ -84,7 +89,7 @@ class GuideController:
             raise QuestionInProgress("已有问题正在处理中")
 
         async with self._question_lock:
-            return await self._ask_text_locked(normalized)
+            return await self._ask_text_locked(normalized, timing)
 
     async def finish_playback(self) -> None:
         if self._state.snapshot.phase in {
@@ -95,12 +100,16 @@ class GuideController:
             await self._state.transition(GuidePhase.IDLE)
             await self._state.set_message("输入问题开始讲解")
 
-    async def _ask_text_locked(self, question: str) -> TextQuestionResult:
+    async def _ask_text_locked(
+        self,
+        question: str,
+        timing: TurnTiming | None = None,
+    ) -> TextQuestionResult:
         await self._state.start_text_question(question)
         if self._needs_exhibit_clarification(question):
             answer = "您指的是哪个产品或展项？"
             await self._state.append_answer(answer)
-            return await self._synthesize_answer(answer)
+            return await self._synthesize_answer(answer, timing)
 
         request_messages = [
             {"role": "system", "content": self._SYSTEM_MESSAGE},
@@ -109,13 +118,19 @@ class GuideController:
         ]
 
         try:
+            if timing is not None:
+                timing.start_xzkb_queue()
             async with self._xzkb_gate.slot(
                 on_wait=lambda: self._state.set_message(
                     "当前使用人数较多，正在排队查询资料"
                 )
             ):
+                if timing is not None:
+                    timing.enter_xzkb_slot()
                 await self._state.set_message("正在查询展项资料")
                 for max_tokens in (None, 8000):
+                    if timing is not None:
+                        timing.start_xzkb_request()
                     stream = (
                         self._xzkb.stream_chat(request_messages)
                         if max_tokens is None
@@ -125,6 +140,8 @@ class GuideController:
                         )
                     )
                     async for event in stream:
+                        if timing is not None and event.text.strip():
+                            timing.receive_xzkb_text()
                         combined = self._state.snapshot.answer + event.text
                         if len(combined) > self._MAX_ANSWER_CHARS:
                             content_limit = self._MAX_ANSWER_CHARS - len(
@@ -143,14 +160,24 @@ class GuideController:
                         "知识库正在重新生成讲解内容"
                     )
         except QueueWaitTimeout as error:
+            if timing is not None:
+                timing.finish_xzkb_queue()
+                timing.fail("xzkb_queue", error)
             await self._degrade("当前使用人数较多，请稍后重试")
             raise GuideServiceUnavailable("capacity") from error
         except (httpx.HTTPError, ValueError) as error:
+            if timing is not None:
+                timing.fail("xzkb", error)
             await self._degrade("知识库暂时不可用，请稍后重试")
             raise GuideServiceUnavailable("xzkb") from error
+        finally:
+            if timing is not None:
+                timing.finish_xzkb()
 
         answer = self._state.snapshot.answer.strip()
         if not answer:
+            if timing is not None:
+                timing.fail("xzkb", GuideServiceUnavailable("xzkb"))
             await self._degrade("知识库没有返回有效答案，请换一种问法")
             raise GuideServiceUnavailable("xzkb")
 
@@ -161,25 +188,47 @@ class GuideController:
             ]
         )
         self._messages = self._messages[-20:]
-        return await self._synthesize_answer(answer)
+        return await self._synthesize_answer(answer, timing)
 
     def _needs_exhibit_clarification(self, question: str) -> bool:
         return not self._messages and any(
             reference in question for reference in self._UNANCHORED_REFERENCES
         )
 
-    async def _synthesize_answer(self, answer: str) -> TextQuestionResult:
+    async def _synthesize_answer(
+        self,
+        answer: str,
+        timing: TurnTiming | None = None,
+    ) -> TextQuestionResult:
         try:
+            if timing is not None:
+                timing.start_tts_queue()
             async with self._tts_gate.slot(
                 on_wait=lambda: self._state.set_message("正在排队生成语音")
             ):
+                if timing is not None:
+                    timing.enter_tts_slot()
                 await self._state.set_message("正在生成讲解语音")
+                if timing is not None:
+                    timing.start_tts_synthesis()
                 audio = await self._speech_client.synthesize(answer)
-        except (QueueWaitTimeout, httpx.HTTPError, ValueError):
+        except QueueWaitTimeout as error:
+            if timing is not None:
+                timing.finish_tts_queue()
+                timing.fail("tts_queue", error)
+            warning = "语音暂时不可用，您仍可阅读文字答案"
+            await self._degrade(warning)
+            return TextQuestionResult(answer=answer, audio=None, warning=warning)
+        except (httpx.HTTPError, ValueError) as error:
+            if timing is not None:
+                timing.fail("tts", error)
             warning = "语音暂时不可用，您仍可阅读文字答案"
             await self._degrade(warning)
             return TextQuestionResult(answer=answer, audio=None, warning=warning)
 
+        finally:
+            if timing is not None:
+                timing.finish_tts_synthesis()
         await self._state.transition(GuidePhase.SPEAKING)
         await self._state.set_message("正在播放讲解")
         return TextQuestionResult(answer=answer, audio=audio)

@@ -1,5 +1,6 @@
 import asyncio
 import io
+import time
 import wave
 from dataclasses import dataclass
 
@@ -7,6 +8,7 @@ import httpx
 
 from showroom_guide.audio_store import AudioStore
 from showroom_guide.controller import GuideController, QuestionInProgress
+from showroom_guide.latency import DeviceLatencyRecorder
 from showroom_guide.models import GuidePhase, GuideSnapshot
 from showroom_guide.state import GuideStateStore
 
@@ -51,11 +53,22 @@ def validate_wav(audio: bytes) -> None:
 
 
 class DeviceVoiceSession:
-    def __init__(self, *, state, controller, speech, audio) -> None:
+    def __init__(
+        self,
+        *,
+        state,
+        controller,
+        speech,
+        audio,
+        metrics: DeviceLatencyRecorder | None = None,
+        clock=time.perf_counter,
+    ) -> None:
         self._state: GuideStateStore = state
         self._controller: GuideController = controller
         self._speech = speech
         self._audio: AudioStore = audio
+        self._metrics = metrics or DeviceLatencyRecorder()
+        self._clock = clock
         self._turn_lock = asyncio.Lock()
 
     @property
@@ -63,6 +76,30 @@ class DeviceVoiceSession:
         return self._state.snapshot
 
     async def process_wav(self, audio: bytes) -> DeviceTurnResult:
+        timing = self._metrics.start_turn(self._clock)
+        outcome = "error"
+        try:
+            result = await self._process_wav(audio, timing)
+        except BaseException as error:
+            if timing.error_type is None:
+                timing.fail("pipeline", error)
+            raise
+        else:
+            outcome = "degraded" if result.warning is not None else "success"
+            return result
+        finally:
+            timing.finish_pipeline()
+            self._metrics.record(
+                timing,
+                outcome,
+                complete_success=outcome == "success" and result.audio_id is not None,
+            )
+
+    async def _process_wav(
+        self,
+        audio: bytes,
+        timing,
+    ) -> DeviceTurnResult:
         if self._turn_lock.locked():
             raise QuestionInProgress("已有设备问题正在处理中")
 
@@ -72,17 +109,21 @@ class DeviceVoiceSession:
             await self._state.set_message("已收到录音")
             await self._state.transition(GuidePhase.TRANSCRIBING)
             await self._state.set_message("正在识别您的问题")
+            timing.start_asr()
             try:
                 transcript = (await self._speech.transcribe(io.BytesIO(audio))).strip()
                 if not transcript:
                     raise ValueError("ASR returned an empty transcription")
             except (httpx.HTTPError, ValueError) as error:
+                timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
                 await self._state.set_message("语音识别暂时不可用，请稍后重试")
                 raise DeviceTranscriptionUnavailable from error
 
+            finally:
+                timing.finish_asr()
             await self._state.set_transcript(transcript)
-            result = await self._controller.ask_text(transcript)
+            result = await self._controller.ask_text(transcript, timing=timing)
             audio_id = self._audio.put(result.audio) if result.audio is not None else None
             return DeviceTurnResult(
                 transcript=transcript,
@@ -90,6 +131,9 @@ class DeviceVoiceSession:
                 audio_id=audio_id,
                 warning=result.warning,
             )
+
+    def metrics_snapshot(self) -> dict[str, object]:
+        return self._metrics.snapshot()
 
     def get_audio(self, audio_id: str) -> bytes:
         return self._audio.get(audio_id)

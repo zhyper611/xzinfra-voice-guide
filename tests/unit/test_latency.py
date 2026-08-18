@@ -1,0 +1,299 @@
+from contextlib import asynccontextmanager
+import logging
+
+import httpx
+import pytest
+
+from showroom_guide.audio_store import AudioStore
+from showroom_guide.clients.xzkb import ChatStreamEvent
+from showroom_guide.concurrency import QueueWaitTimeout
+from showroom_guide.controller import GuideController, GuideServiceUnavailable
+from showroom_guide.device import DeviceTranscriptionUnavailable, DeviceVoiceSession
+from showroom_guide.latency import DeviceLatencyRecorder, TurnTiming, nearest_rank
+from showroom_guide.state import GuideStateStore
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+class ClockGate:
+    def __init__(self, clock: Clock, wait_seconds: float = 0.0) -> None:
+        self.clock = clock
+        self.wait_seconds = wait_seconds
+
+    @asynccontextmanager
+    async def slot(self, on_wait=None):
+        if self.wait_seconds and on_wait is not None:
+            result = on_wait()
+            if hasattr(result, "__await__"):
+                await result
+        self.clock.advance(self.wait_seconds)
+        yield
+
+
+class TimeoutGate:
+    def __init__(self, clock: Clock, wait_seconds: float) -> None:
+        self.clock = clock
+        self.wait_seconds = wait_seconds
+
+    @asynccontextmanager
+    async def slot(self, on_wait=None):
+        if on_wait is not None:
+            result = on_wait()
+            if hasattr(result, "__await__"):
+                await result
+        self.clock.advance(self.wait_seconds)
+        raise QueueWaitTimeout
+        yield
+
+
+class TimedSpeech:
+    def __init__(self, clock: Clock, *, fail_asr: bool = False, fail_tts: bool = False):
+        self.clock = clock
+        self.fail_asr = fail_asr
+        self.fail_tts = fail_tts
+
+    async def transcribe(self, _audio) -> str:
+        self.clock.advance(0.01)
+        if self.fail_asr:
+            raise httpx.ReadTimeout("timeout")
+        return "question"
+
+    async def synthesize(self, _text: str) -> bytes:
+        self.clock.advance(0.04)
+        if self.fail_tts:
+            raise httpx.ReadTimeout("timeout")
+        return b"RIFF\x04\x00\x00\x00WAVE"
+
+
+class TimedXzkb:
+    def __init__(self, clock: Clock, *, retry_empty: bool = False) -> None:
+        self.clock = clock
+        self.retry_empty = retry_empty
+        self.calls = 0
+
+    async def stream_chat(self, _messages, max_tokens=None):
+        self.calls += 1
+        if self.retry_empty and self.calls == 1:
+            self.clock.advance(0.01)
+            return
+        self.clock.advance(0.02)
+        yield ChatStreamEvent(text="answer")
+        self.clock.advance(0.03)
+        yield ChatStreamEvent(text=" more")
+
+
+class WhitespaceThenTextXzkb:
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+
+    async def stream_chat(self, _messages, max_tokens=None):
+        self.clock.advance(0.01)
+        yield ChatStreamEvent(text=" ")
+        self.clock.advance(0.02)
+        yield ChatStreamEvent(text="answer")
+
+
+def wav() -> bytes:
+    return (
+        b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+        b"\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+    )
+
+
+def make_session(
+    clock: Clock,
+    *,
+    xzkb_wait: float = 0.0,
+    tts_wait: float = 0.0,
+    retry_empty: bool = False,
+    fail_asr: bool = False,
+    fail_tts: bool = False,
+):
+    state = GuideStateStore()
+    speech = TimedSpeech(clock, fail_asr=fail_asr, fail_tts=fail_tts)
+    controller = GuideController(
+        state,
+        TimedXzkb(clock, retry_empty=retry_empty),
+        speech,
+        xzkb_gate=ClockGate(clock, xzkb_wait),
+        tts_gate=ClockGate(clock, tts_wait),
+    )
+    recorder = DeviceLatencyRecorder()
+    return DeviceVoiceSession(
+        state=state,
+        controller=controller,
+        speech=speech,
+        audio=AudioStore(),
+        metrics=recorder,
+        clock=clock,
+    ), recorder
+
+
+@pytest.mark.asyncio
+async def test_device_turn_records_stage_boundaries_without_queueing():
+    clock = Clock()
+    session, recorder = make_session(clock)
+
+    await session.process_wav(wav())
+
+    metrics = recorder.snapshot()["metrics"]
+    assert metrics["asr_ms"] == {"samples": 1, "p50": 10.0, "p95": 10.0}
+    assert metrics["xzkb_queue_ms"] == {"samples": 1, "p50": 0.0, "p95": 0.0}
+    assert metrics["xzkb_ttft_ms"] == {"samples": 1, "p50": 20.0, "p95": 20.0}
+    assert metrics["xzkb_generation_ms"] == {"samples": 1, "p50": 30.0, "p95": 30.0}
+    assert metrics["xzkb_total_ms"] == {"samples": 1, "p50": 50.0, "p95": 50.0}
+    assert metrics["tts_queue_ms"] == {"samples": 1, "p50": 0.0, "p95": 0.0}
+    assert metrics["tts_synthesis_ms"] == {"samples": 1, "p50": 40.0, "p95": 40.0}
+    assert metrics["server_pipeline_total_ms"] == {
+        "samples": 1,
+        "p50": 100.0,
+        "p95": 100.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_device_turn_records_gate_waits_and_empty_result_retry_ttft():
+    clock = Clock()
+    session, recorder = make_session(
+        clock,
+        xzkb_wait=0.007,
+        tts_wait=0.011,
+        retry_empty=True,
+    )
+
+    await session.process_wav(wav())
+
+    metrics = recorder.snapshot()["metrics"]
+    assert metrics["xzkb_queue_ms"]["p50"] == 7.0
+    assert metrics["xzkb_ttft_ms"]["p50"] == 30.0
+    assert metrics["tts_queue_ms"]["p50"] == 11.0
+
+
+@pytest.mark.asyncio
+async def test_whitespace_stream_event_does_not_complete_xzkb_ttft():
+    clock = Clock()
+    state = GuideStateStore()
+    speech = TimedSpeech(clock)
+    controller = GuideController(state, WhitespaceThenTextXzkb(clock), speech)
+    timing = TurnTiming(clock=clock)
+
+    await controller.ask_text("question", timing=timing)
+
+    assert timing.xzkb_ttft_ms == 30.0
+
+
+@pytest.mark.asyncio
+async def test_xzkb_queue_timeout_records_wait_duration_and_stage():
+    clock = Clock()
+    state = GuideStateStore()
+    speech = TimedSpeech(clock)
+    controller = GuideController(
+        state,
+        TimedXzkb(clock),
+        speech,
+        xzkb_gate=TimeoutGate(clock, 0.125),
+    )
+    timing = TurnTiming(clock=clock)
+
+    with pytest.raises(GuideServiceUnavailable):
+        await controller.ask_text("question", timing=timing)
+
+    assert timing.xzkb_queue_ms == 125.0
+    assert timing.failure_stage == "xzkb_queue"
+    assert timing.error_type == "QueueWaitTimeout"
+
+
+@pytest.mark.asyncio
+async def test_tts_queue_timeout_records_wait_duration_and_queue_stage():
+    clock = Clock()
+    state = GuideStateStore()
+    speech = TimedSpeech(clock)
+    controller = GuideController(
+        state,
+        TimedXzkb(clock),
+        speech,
+        tts_gate=TimeoutGate(clock, 0.125),
+    )
+    timing = TurnTiming(clock=clock)
+
+    result = await controller.ask_text("question", timing=timing)
+
+    assert result.warning is not None
+    assert timing.tts_queue_ms == pytest.approx(125.0)
+    assert timing.failure_stage == "tts_queue"
+    assert timing.error_type == "QueueWaitTimeout"
+
+
+@pytest.mark.asyncio
+async def test_tts_degradation_is_logged_but_excluded_from_baseline_window():
+    clock = Clock()
+    session, recorder = make_session(clock, fail_tts=True)
+
+    result = await session.process_wav(wav())
+
+    assert result.warning is not None
+    snapshot = recorder.snapshot()
+    assert snapshot["window_size"] == 0
+    assert snapshot["counts"] == {"success": 0, "degraded": 1, "error": 0}
+
+
+@pytest.mark.asyncio
+async def test_asr_failure_records_elapsed_time_without_a_baseline_sample():
+    clock = Clock()
+    session, recorder = make_session(clock, fail_asr=True)
+
+    with pytest.raises(DeviceTranscriptionUnavailable):
+        await session.process_wav(wav())
+
+    snapshot = recorder.snapshot()
+    assert snapshot["window_size"] == 0
+    assert snapshot["counts"] == {"success": 0, "degraded": 0, "error": 1}
+
+
+def test_nearest_rank_handles_empty_and_single_samples():
+    assert nearest_rank([], 50) is None
+    assert nearest_rank([7.5], 50) == 7.5
+    assert nearest_rank([7.5], 95) == 7.5
+    assert nearest_rank([1, 2, 3, 4, 5], 50) == 3
+    assert nearest_rank([1, 2, 3, 4, 5], 95) == 5
+
+
+def test_recorder_emits_timing_log_at_warning_level(caplog):
+    clock = Clock()
+    recorder = DeviceLatencyRecorder()
+    timing = TurnTiming(clock=clock)
+    with caplog.at_level(logging.WARNING, logger="showroom_guide.latency"):
+        recorder.record(timing, "error", complete_success=False)
+
+    assert "device_turn_timing" in caplog.text
+
+
+def test_latency_recorder_caps_success_window_at_500_and_omits_empty_metrics():
+    clock = Clock()
+    recorder = DeviceLatencyRecorder()
+    for number in range(501):
+        timing = TurnTiming(clock=clock)
+        timing.asr_ms = float(number)
+        recorder.record(timing, "success", complete_success=True)
+
+    snapshot = recorder.snapshot()
+    assert snapshot["window_size"] == 500
+    assert snapshot["metrics"]["asr_ms"] == {
+        "samples": 500,
+        "p50": 250.0,
+        "p95": 475.0,
+    }
+    assert snapshot["metrics"]["tts_synthesis_ms"] == {
+        "samples": 0,
+        "p50": None,
+        "p95": None,
+    }

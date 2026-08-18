@@ -115,6 +115,17 @@ curl -X POST http://127.0.0.1:8765/api/device/turn \
 
 响应包含识别文本、知识库回答和临时 TTS 音频地址。播放结束后调用 `/api/device/playback-finished`，开始新讲解任务前可调用 `/api/device/reset` 清空设备上下文。
 
+### 查看链路耗时
+
+完成设备问答后，在项目根目录运行：
+
+```powershell
+$key = ((Get-Content .env | Where-Object { $_ -match '^GUIDE_DEVICE_API_KEY=' }) -split '=', 2)[1]
+(Invoke-RestMethod -Headers @{'X-Device-Key'=$key} http://127.0.0.1:8765/api/device/metrics).metrics | Format-List
+```
+
+结果包含 ASR、知识库、TTS 和服务端总耗时的样本数、P50、P95；最多统计最近 500 次成功请求，服务重启后清空。
+
 ## 测试
 
 ```bash

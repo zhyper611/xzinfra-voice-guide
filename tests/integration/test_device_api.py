@@ -37,6 +37,13 @@ class FakeDevice:
         self.get_audio = MagicMock()
         self.finish_playback = AsyncMock()
         self.reset = AsyncMock()
+        self.metrics_snapshot = MagicMock(
+            return_value={
+                "window_size": 0,
+                "counts": {"success": 0, "degraded": 0, "error": 0},
+                "metrics": {},
+            }
+        )
 
 
 class FakeRuntime:
@@ -63,6 +70,7 @@ def authorized_headers() -> dict[str, str]:
     ("method", "path", "kwargs"),
     [
         ("get", "/api/device/state", {}),
+        ("get", "/api/device/metrics", {}),
         ("post", "/api/device/turn", {"files": {"file": ("q.wav", make_wav())}}),
         ("get", "/api/device/audio/audio-id", {}),
         ("post", "/api/device/playback-finished", {}),
@@ -93,6 +101,23 @@ def test_device_state_returns_snapshot():
     assert response.status_code == 200
     assert response.json()["phase"] == "transcribing"
     assert response.json()["transcript"] == "问题"
+
+
+def test_device_metrics_returns_protected_read_only_snapshot():
+    runtime = FakeRuntime()
+    runtime.device.metrics_snapshot.return_value = {
+        "window_size": 1,
+        "counts": {"success": 1, "degraded": 2, "error": 3},
+        "metrics": {
+            "asr_ms": {"samples": 1, "p50": 12.34, "p95": 12.34},
+        },
+    }
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/api/device/metrics", headers=authorized_headers())
+
+    assert response.status_code == 200
+    assert response.json() == runtime.device.metrics_snapshot.return_value
+    runtime.device.metrics_snapshot.assert_called_once_with()
 
 
 def test_device_turn_returns_transcript_answer_and_audio_url():

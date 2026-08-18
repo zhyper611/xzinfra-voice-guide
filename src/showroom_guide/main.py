@@ -300,6 +300,13 @@ def create_app(runtime: Runtime) -> FastAPI:
     async def get_device_state() -> GuideSnapshot:
         return runtime.device.snapshot
 
+    @app.get(
+        "/api/device/metrics",
+        dependencies=[Depends(require_device_key)],
+    )
+    async def get_device_metrics() -> dict[str, object]:
+        return runtime.device.metrics_snapshot()
+
     @app.post(
         "/api/device/turn",
         response_model=DeviceTurnResponse,
