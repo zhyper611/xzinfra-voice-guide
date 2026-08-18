@@ -7,6 +7,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
 METRIC_NAMES = (
@@ -24,6 +25,13 @@ METRIC_NAMES = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def utc_now_rfc3339() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00",
+        "Z",
+    )
 
 
 @dataclass
@@ -174,9 +182,15 @@ def nearest_rank(samples: list[float], percentile: int) -> float | None:
 class DeviceLatencyRecorder:
     """Thread-safe aggregate metrics for recent complete successful device turns."""
 
-    def __init__(self, max_samples: int = 500) -> None:
+    def __init__(
+        self,
+        max_samples: int = 500,
+        utc_now: Callable[[], str] = utc_now_rfc3339,
+    ) -> None:
         self._samples: deque[TurnTiming] = deque(maxlen=max_samples)
         self._counts = {"success": 0, "degraded": 0, "error": 0}
+        self._latest: dict[str, object] | None = None
+        self._utc_now = utc_now
         self._lock = threading.Lock()
 
     def start_turn(self, clock: Callable[[], float] = time.perf_counter) -> TurnTiming:
@@ -187,15 +201,19 @@ class DeviceLatencyRecorder:
             self._counts[outcome] += 1
             if complete_success:
                 self._samples.append(timing)
+            latest = timing.log_payload(outcome)
+            latest["recorded_at"] = self._utc_now()
+            self._latest = latest
         logger.warning(
             "device_turn_timing %s",
-            json.dumps(timing.log_payload(outcome), sort_keys=True),
+            json.dumps(latest, sort_keys=True),
         )
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             samples = list(self._samples)
             counts = dict(self._counts)
+            latest = None if self._latest is None else dict(self._latest)
         metrics: dict[str, dict[str, float | int | None]] = {}
         for name in METRIC_NAMES:
             values = [value for item in samples if (value := getattr(item, name)) is not None]
@@ -204,7 +222,12 @@ class DeviceLatencyRecorder:
                 "p50": self._rounded(nearest_rank(values, 50)),
                 "p95": self._rounded(nearest_rank(values, 95)),
             }
-        return {"window_size": len(samples), "counts": counts, "metrics": metrics}
+        return {
+            "window_size": len(samples),
+            "counts": counts,
+            "latest": latest,
+            "metrics": metrics,
+        }
 
     @staticmethod
     def _rounded(value: float | None) -> float | None:

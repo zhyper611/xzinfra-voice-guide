@@ -15,6 +15,19 @@ const transcript = document.querySelector("#transcript");
 const answer = document.querySelector("#answer");
 const audio = document.querySelector("#device-audio");
 const audioHint = document.querySelector("#audio-hint");
+const latencyCurrentTab = document.querySelector("#latency-current-tab");
+const latencyStatsTab = document.querySelector("#latency-stats-tab");
+const latencyRefresh = document.querySelector("#latency-refresh");
+const latencyCurrentView = document.querySelector("#latency-current-view");
+const latencyStatsView = document.querySelector("#latency-stats-view");
+const latencyEmpty = document.querySelector("#latency-empty");
+const latencyCurrentContent = document.querySelector("#latency-current-content");
+const latencyOutcome = document.querySelector("#latency-outcome");
+const latencyRecordedAt = document.querySelector("#latency-recorded-at");
+const latencyTotal = document.querySelector("#latency-total");
+const latencyFailure = document.querySelector("#latency-failure");
+const latencyStages = document.querySelector("#latency-stages");
+const latencyStatsBody = document.querySelector("#latency-stats-body");
 
 const phaseLabels = {
   idle: "待机",
@@ -29,6 +42,36 @@ const phaseLabels = {
 let audioObjectUrl = null;
 let pollTimer = null;
 let stateRequestPending = false;
+let metricsRequestPending = false;
+
+const outcomeLabels = {
+  success: "成功",
+  degraded: "降级",
+  error: "失败",
+};
+
+const metricLabels = [
+  ["asr_ms", "ASR 语音识别"],
+  ["xzkb_queue_ms", "知识库排队"],
+  ["xzkb_headers_ms", "请求到响应头"],
+  ["xzkb_first_sse_ms", "等待首个 SSE"],
+  ["xzkb_first_content_ms", "SSE 到正文首字"],
+  ["xzkb_ttft_ms", "首字总耗时"],
+  ["xzkb_generation_ms", "正文生成"],
+  ["xzkb_total_ms", "知识库总耗时"],
+  ["tts_queue_ms", "TTS 排队"],
+  ["tts_synthesis_ms", "TTS 合成"],
+  ["server_pipeline_total_ms", "服务端总耗时"],
+];
+
+const xzkbSubstages = [
+  ["请求到响应头", "xzkb_headers_ms"],
+  ["等待首个 SSE", "xzkb_first_sse_ms"],
+  ["SSE 到正文首字", "xzkb_first_content_ms"],
+  ["正文生成", "xzkb_generation_ms"],
+  ["首字总耗时", "xzkb_ttft_ms"],
+  ["知识库总耗时", "xzkb_total_ms"],
+];
 
 function requireKey() {
   const key = deviceKey.value.trim();
@@ -134,6 +177,149 @@ function startPolling() {
   pollTimer = window.setInterval(refreshState, 2000);
 }
 
+function formatDuration(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return "--";
+  }
+  const milliseconds = Number(value);
+  if (milliseconds < 1) return "< 1ms";
+  if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`;
+  return `${(milliseconds / 1000).toFixed(2)}s`;
+}
+
+function formatRecordedAt(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined) return null;
+  return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function appendTextElement(parent, tagName, className, value) {
+  const element = document.createElement(tagName);
+  element.className = className;
+  element.textContent = value;
+  parent.append(element);
+  return element;
+}
+
+function appendSubstages(parent, latest) {
+  const substages = document.createElement("div");
+  substages.className = "latency-substages";
+  for (const [label, name] of xzkbSubstages) {
+    const row = document.createElement("div");
+    row.className = "latency-substage";
+    appendTextElement(row, "span", "latency-substage-name", label);
+    appendTextElement(row, "span", "latency-substage-time", formatDuration(latest[name]));
+    substages.append(row);
+  }
+  parent.append(substages);
+}
+
+function renderLatencyStages(latest) {
+  latencyStages.replaceChildren();
+  const total = numberOrNull(latest.server_pipeline_total_ms);
+  const knownDurations = [
+    latest.asr_ms,
+    latest.xzkb_queue_ms,
+    latest.xzkb_total_ms,
+    latest.tts_queue_ms,
+    latest.tts_synthesis_ms,
+  ].map(numberOrNull);
+  const other = total === null ? null : Math.max(0, total - knownDurations.reduce(
+    (sum, value) => sum + (value === null ? 0 : value),
+    0,
+  ));
+  const stages = [
+    ["ASR 语音识别", numberOrNull(latest.asr_ms)],
+    ["知识库排队", numberOrNull(latest.xzkb_queue_ms)],
+    ["知识库处理", numberOrNull(latest.xzkb_total_ms), true],
+    ["TTS 排队", numberOrNull(latest.tts_queue_ms)],
+    ["TTS 合成", numberOrNull(latest.tts_synthesis_ms)],
+    ["其他处理", other],
+  ];
+  const maxDuration = Math.max(0, ...stages.map(([, value]) => value === null ? 0 : value));
+
+  for (const [label, duration, hasSubstages] of stages) {
+    const stage = document.createElement("div");
+    const row = document.createElement("div");
+    row.className = "latency-stage-row";
+    const labelArea = document.createElement("div");
+    appendTextElement(labelArea, "span", "latency-stage-name", label);
+    const track = document.createElement("div");
+    track.className = "latency-track";
+    const fill = document.createElement("div");
+    fill.className = "latency-fill";
+    fill.style.width = duration === null || maxDuration === 0 ? "0%" : `${(duration / maxDuration) * 100}%`;
+    track.append(fill);
+    labelArea.append(track);
+    row.append(labelArea);
+    appendTextElement(row, "span", "latency-stage-time", formatDuration(duration));
+    stage.append(row);
+    if (hasSubstages) appendSubstages(stage, latest);
+    latencyStages.append(stage);
+  }
+}
+
+function renderMetrics(snapshot) {
+  const latest = snapshot && snapshot.latest;
+  latencyEmpty.hidden = Boolean(latest);
+  latencyCurrentContent.hidden = !latest;
+  if (latest) {
+    const outcome = latest.outcome || "error";
+    latencyOutcome.textContent = outcomeLabels[outcome] || outcome;
+    latencyOutcome.dataset.outcome = outcome;
+    latencyRecordedAt.textContent = formatRecordedAt(latest.recorded_at);
+    latencyTotal.textContent = formatDuration(latest.server_pipeline_total_ms);
+    const hasFailure = Boolean(latest.failure_stage || latest.error_type);
+    latencyFailure.hidden = !hasFailure;
+    latencyFailure.textContent = hasFailure
+      ? `失败阶段：${latest.failure_stage || "--"}；错误类型：${latest.error_type || "--"}`
+      : "";
+    renderLatencyStages(latest);
+  }
+
+  latencyStatsBody.replaceChildren();
+  const metrics = snapshot && snapshot.metrics ? snapshot.metrics : {};
+  for (const [name, label] of metricLabels) {
+    const item = metrics[name] || {};
+    const row = document.createElement("tr");
+    appendTextElement(row, "td", "", label);
+    appendTextElement(row, "td", "", String(item.samples ?? 0));
+    appendTextElement(row, "td", "", formatDuration(item.p50));
+    appendTextElement(row, "td", "", formatDuration(item.p95));
+    latencyStatsBody.append(row);
+  }
+}
+
+function showLatencyView(view) {
+  const showCurrent = view === "current";
+  latencyCurrentTab.setAttribute("aria-selected", String(showCurrent));
+  latencyStatsTab.setAttribute("aria-selected", String(!showCurrent));
+  latencyCurrentView.hidden = !showCurrent;
+  latencyStatsView.hidden = showCurrent;
+}
+
+async function refreshMetrics({ showFailure = false } = {}) {
+  if (!deviceKey.value.trim() || metricsRequestPending) return;
+  metricsRequestPending = true;
+  latencyRefresh.disabled = true;
+  try {
+    const response = await request("/api/device/metrics");
+    renderMetrics(await response.json());
+  } catch (error) {
+    if (error.message === "设备凭证无效") stopPolling();
+    if (showFailure || error.message === "设备凭证无效") showError(error);
+  } finally {
+    metricsRequestPending = false;
+    latencyRefresh.disabled = false;
+  }
+}
+
 async function loadProtectedAudio(payload) {
   clearAudio();
   const response = await request(payload.audio_url);
@@ -169,11 +355,15 @@ toggleKey.addEventListener("click", () => {
   deviceKey.focus();
 });
 
-deviceKey.addEventListener("change", startPolling);
+deviceKey.addEventListener("change", () => {
+  startPolling();
+  refreshMetrics({ showFailure: true });
+});
 deviceKey.addEventListener("input", () => {
   if (!deviceKey.value.trim()) {
     stopPolling();
     statusMessage.textContent = "填写密钥后开始测试";
+    renderMetrics(null);
     clearError();
   }
 });
@@ -231,6 +421,7 @@ deviceForm.addEventListener("submit", async (event) => {
     showError(error);
     audioHint.textContent = "语音尚未生成";
   } finally {
+    await refreshMetrics();
     setOperationPending(false);
     startPolling();
   }
@@ -264,6 +455,10 @@ audio.addEventListener("ended", async () => {
   }
 });
 
+latencyCurrentTab.addEventListener("click", () => showLatencyView("current"));
+latencyStatsTab.addEventListener("click", () => showLatencyView("stats"));
+latencyRefresh.addEventListener("click", () => refreshMetrics({ showFailure: true }));
+
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopPolling();
   else startPolling();
@@ -273,3 +468,6 @@ window.addEventListener("beforeunload", () => {
   stopPolling();
   if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
 });
+
+renderMetrics(null);
+if (deviceKey.value.trim()) refreshMetrics({ showFailure: true });

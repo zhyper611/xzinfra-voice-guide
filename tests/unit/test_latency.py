@@ -9,7 +9,12 @@ from showroom_guide.clients.xzkb import ChatStreamEvent, XzkbStreamMilestone
 from showroom_guide.concurrency import QueueWaitTimeout
 from showroom_guide.controller import GuideController, GuideServiceUnavailable
 from showroom_guide.device import DeviceTranscriptionUnavailable, DeviceVoiceSession
-from showroom_guide.latency import DeviceLatencyRecorder, TurnTiming, nearest_rank
+from showroom_guide.latency import (
+    METRIC_NAMES,
+    DeviceLatencyRecorder,
+    TurnTiming,
+    nearest_rank,
+)
 from showroom_guide.state import GuideStateStore
 
 
@@ -354,7 +359,9 @@ def test_nearest_rank_handles_empty_and_single_samples():
 
 def test_recorder_emits_timing_log_at_warning_level(caplog):
     clock = Clock()
-    recorder = DeviceLatencyRecorder()
+    recorder = DeviceLatencyRecorder(
+        utc_now=lambda: "2026-08-18T01:02:03.456Z"
+    )
     timing = TurnTiming(clock=clock)
     timing.xzkb_headers_ms = 1.25
     timing.xzkb_first_sse_ms = 2.5
@@ -366,6 +373,73 @@ def test_recorder_emits_timing_log_at_warning_level(caplog):
     assert '"xzkb_headers_ms": 1.25' in caplog.text
     assert '"xzkb_first_sse_ms": 2.5' in caplog.text
     assert '"xzkb_first_content_ms": 3.75' in caplog.text
+    assert '"recorded_at": "2026-08-18T01:02:03.456Z"' in caplog.text
+    assert "question" not in caplog.text
+    assert "answer" not in caplog.text
+    assert "api-key" not in caplog.text
+
+
+def test_latest_starts_empty_and_tracks_all_outcomes_without_affecting_window():
+    clock = Clock()
+    timestamps = iter(
+        [
+            "2026-08-18T01:02:03.000Z",
+            "2026-08-18T01:02:04.000Z",
+            "2026-08-18T01:02:05.000Z",
+        ]
+    )
+    recorder = DeviceLatencyRecorder(utc_now=lambda: next(timestamps))
+
+    assert recorder.snapshot()["latest"] is None
+
+    success = TurnTiming(clock=clock, turn_id="success-turn")
+    success.asr_ms = 12.345
+    recorder.record(success, "success", complete_success=True)
+
+    first = recorder.snapshot()
+    assert first["window_size"] == 1
+    assert first["latest"]["recorded_at"] == "2026-08-18T01:02:03.000Z"
+    assert first["latest"]["turn_id"] == "success-turn"
+    assert first["latest"]["outcome"] == "success"
+    assert first["latest"]["asr_ms"] == 12.35
+    assert all(name in first["latest"] for name in METRIC_NAMES)
+
+    degraded = TurnTiming(clock=clock, turn_id="degraded-turn")
+    degraded.tts_synthesis_ms = 8.0
+    recorder.record(degraded, "degraded", complete_success=False)
+
+    second = recorder.snapshot()
+    assert second["window_size"] == 1
+    assert second["latest"]["turn_id"] == "degraded-turn"
+    assert second["latest"]["outcome"] == "degraded"
+    assert second["latest"]["tts_synthesis_ms"] == 8.0
+
+    error = TurnTiming(clock=clock, turn_id="error-turn")
+    error.fail("asr", ValueError())
+    recorder.record(error, "error", complete_success=False)
+
+    latest = recorder.snapshot()["latest"]
+    assert latest["turn_id"] == "error-turn"
+    assert latest["outcome"] == "error"
+    assert latest["recorded_at"] == "2026-08-18T01:02:05.000Z"
+    assert latest["failure_stage"] == "asr"
+    assert latest["error_type"] == "ValueError"
+    assert latest["xzkb_headers_ms"] is None
+    assert latest["tts_synthesis_ms"] is None
+
+
+def test_latest_snapshot_is_a_copy():
+    clock = Clock()
+    recorder = DeviceLatencyRecorder(
+        utc_now=lambda: "2026-08-18T01:02:03.000Z"
+    )
+    timing = TurnTiming(clock=clock, turn_id="original-turn")
+    recorder.record(timing, "success", complete_success=True)
+
+    snapshot = recorder.snapshot()
+    snapshot["latest"]["turn_id"] = "modified-outside"
+
+    assert recorder.snapshot()["latest"]["turn_id"] == "original-turn"
 
 
 def test_latency_recorder_caps_success_window_at_500_and_omits_empty_metrics():

@@ -76,8 +76,15 @@ def test_device_test_page_is_served_without_creating_visitor_session():
     assert 'id="device-key"' in response.text
     assert 'id="wav-file"' in response.text
     assert 'id="device-audio"' in response.text
-    assert 'src="/static/device-test.js"' in response.text
-    assert 'href="/static/device-test.css"' in response.text
+    assert 'id="latency-current-tab"' in response.text
+    assert 'id="latency-stats-tab"' in response.text
+    assert 'id="latency-refresh"' in response.text
+    assert 'id="latency-stages"' in response.text
+    assert 'id="latency-stats-body"' in response.text
+    assert '<span>03</span>' in response.text
+    assert '<p>LATENCY TIMING</p><h2 id="latency-title">链路耗时</h2>' in response.text
+    assert 'src="/static/device-test.js?v=' in response.text
+    assert 'href="/static/device-test.css?v=' in response.text
     assert 'rel="icon" href="/static/xzinfra-logo.svg"' in response.text
     assert "showroom_session=" not in response.headers.get("set-cookie", "")
 
@@ -90,6 +97,8 @@ def test_device_test_styles_are_branded_responsive_and_accessible():
     assert response.status_code == 200
     assert "--brand: #1c6af6" in response.text
     assert "--navy: #19213d" in response.text
+    assert ".latency-panel" in response.text
+    assert ".latency-table-wrap" in response.text
     assert "@media (max-width: 760px)" in response.text
     assert "@media (prefers-reduced-motion: reduce)" in response.text
     assert ":focus-visible" in response.text
@@ -104,11 +113,19 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'headers.set("X-Device-Key", deviceKey.value.trim())' in response.text
     assert 'request("/api/device/turn"' in response.text
     assert 'request("/api/device/state"' in response.text
+    assert 'request("/api/device/metrics")' in response.text
     assert 'request(payload.audio_url' in response.text
     assert "URL.createObjectURL(audioBlob)" in response.text
     assert 'request("/api/device/playback-finished"' in response.text
     assert 'request("/api/device/reset"' in response.text
     assert "textContent" in response.text
+    assert "function formatDuration" in response.text
+    assert "function refreshMetrics" in response.text
+    assert "await refreshMetrics();" in response.text
+    assert 'window.setInterval(refreshState, 2000)' in response.text
+    assert "setInterval(refreshMetrics" not in response.text
+    assert 'latency-current-tab' in response.text
+    assert 'latency-stats-tab' in response.text
     assert "localStorage" not in response.text
     assert "sessionStorage" not in response.text
     assert "document.cookie" not in response.text
