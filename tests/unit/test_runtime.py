@@ -40,6 +40,10 @@ async def test_runtime_builds_isolated_device_with_shared_clients_and_gates():
     assert runtime.device_api_key.get_secret_value() == "device-test-key"
     assert runtime.device_max_upload_bytes == 10 * 1024 * 1024
     assert runtime.xzkb._empty_search_response == "请询问展厅相关内容。"
+    assert runtime.local_device._session is runtime.device
+    assert runtime.local_device._audio._sample_rate == 16000
+    assert runtime.local_device._max_recording_seconds == 60.0
+    assert runtime.local_device._min_recording_seconds == 0.5
 
     await runtime.aclose()
 

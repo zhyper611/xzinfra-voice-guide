@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#f5f8ff">
   <title>树莓派语音链路测试 · 新智惠想</title>
   <link rel="icon" href="/static/xzinfra-logo.svg">
-  <link rel="stylesheet" href="/static/device-test.css?v=20260818">
-  <script src="/static/device-test.js?v=20260818" defer></script>
+  <link rel="stylesheet" href="/static/device-test.css?v=20260819">
+  <script src="/static/device-test.js?v=20260819" defer></script>
 </head>
 <body>
   <header class="brand-bar">
@@ -21,7 +21,7 @@
     <header class="page-heading">
       <p class="eyebrow">RASPBERRY PI VOICE PIPELINE</p>
       <h1>树莓派语音链路测试</h1>
-      <p>上传设备标准 WAV，验证识别、知识库回答与语音合成。</p>
+      <p>直接录音或上传标准 WAV，验证识别、知识库回答与语音合成。</p>
     </header>
 
     <div class="workspace">
@@ -38,17 +38,33 @@
             <button id="toggle-key" type="button" aria-label="显示设备密钥" aria-pressed="false">显示</button>
           </div>
 
-          <label for="wav-file">测试音频</label>
-          <label class="drop-zone" id="drop-zone" for="wav-file">
-            <input id="wav-file" name="file" type="file" accept=".wav,audio/wav" required>
-            <strong id="file-name">选择或拖放 WAV 文件</strong>
-            <span>16 kHz · 单声道 · 16-bit PCM · 最大 10 MiB</span>
-          </label>
+          <fieldset class="input-method">
+            <legend>输入方式</legend>
+            <div class="mode-switch" role="tablist" aria-label="语音输入方式">
+              <button type="button" role="tab" data-mode="microphone" aria-selected="true" aria-controls="microphone-input">本机麦克风</button>
+              <button type="button" role="tab" data-mode="wav" aria-selected="false" aria-controls="wav-input">WAV 文件</button>
+            </div>
+          </fieldset>
 
-          <div class="actions">
-            <button class="primary" id="run-test" type="submit"><span>开始测试</span><b aria-hidden="true">→</b></button>
-            <button class="secondary" id="reset-device" type="button">重置设备</button>
-          </div>
+          <section class="input-mode-panel microphone-panel" id="microphone-input" role="tabpanel">
+            <button class="record-button" id="local-record" type="button" disabled>
+              <span class="record-indicator" aria-hidden="true"></span>
+              <span id="local-record-label">开始录音</span>
+            </button>
+            <p>声音由树莓派默认麦克风采集，回答从默认扬声器播放。</p>
+          </section>
+
+          <section class="input-mode-panel wav-panel" id="wav-input" role="tabpanel" hidden>
+            <label for="wav-file">测试音频</label>
+            <label class="drop-zone" id="drop-zone" for="wav-file">
+              <input id="wav-file" name="file" type="file" accept=".wav,audio/wav" required>
+              <strong id="file-name">选择或拖放 WAV 文件</strong>
+              <span>16 kHz · 单声道 · 16-bit PCM · 最大 10 MiB</span>
+            </label>
+            <button class="primary wav-submit" id="run-test" type="submit"><span>开始测试</span><b aria-hidden="true">→</b></button>
+          </section>
+
+          <button class="secondary reset-button" id="reset-device" type="button">重置设备</button>
         </form>
         <p class="error" id="device-error" role="alert"></p>
       </section>

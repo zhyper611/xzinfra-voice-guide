@@ -21,6 +21,10 @@ class DeviceTranscriptionUnavailable(RuntimeError):
     pass
 
 
+class NoSpeechDetected(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class DeviceTurnResult:
     transcript: str
@@ -75,11 +79,31 @@ class DeviceVoiceSession:
     def snapshot(self) -> GuideSnapshot:
         return self._state.snapshot
 
+    async def begin_recording(self) -> None:
+        if self._turn_lock.locked() or self._controller.is_busy:
+            raise QuestionInProgress("已有设备问题正在处理中")
+        await self._state.start_recording()
+
     async def process_wav(self, audio: bytes) -> DeviceTurnResult:
+        return await self._run_timed_turn(audio, start_recording=True)
+
+    async def process_recorded_wav(self, audio: bytes) -> DeviceTurnResult:
+        return await self._run_timed_turn(audio, start_recording=False)
+
+    async def _run_timed_turn(
+        self,
+        audio: bytes,
+        *,
+        start_recording: bool,
+    ) -> DeviceTurnResult:
         timing = self._metrics.start_turn(self._clock)
         outcome = "error"
         try:
-            result = await self._process_wav(audio, timing)
+            result = await self._process_wav(
+                audio,
+                timing,
+                start_recording=start_recording,
+            )
         except BaseException as error:
             if timing.error_type is None:
                 timing.fail("pipeline", error)
@@ -99,27 +123,35 @@ class DeviceVoiceSession:
         self,
         audio: bytes,
         timing,
+        *,
+        start_recording: bool,
     ) -> DeviceTurnResult:
         if self._turn_lock.locked():
             raise QuestionInProgress("已有设备问题正在处理中")
 
         async with self._turn_lock:
             validate_wav(audio)
-            await self._state.transition(GuidePhase.RECORDING)
-            await self._state.set_message("已收到录音")
+            if start_recording:
+                await self._state.start_recording()
+            elif self._state.snapshot.phase is not GuidePhase.RECORDING:
+                raise InvalidDeviceAudio("设备当前没有正在进行的录音")
             await self._state.transition(GuidePhase.TRANSCRIBING)
             await self._state.set_message("正在识别您的问题")
             timing.start_asr()
             try:
                 transcript = (await self._speech.transcribe(io.BytesIO(audio))).strip()
                 if not transcript:
-                    raise ValueError("ASR returned an empty transcription")
-            except (httpx.HTTPError, ValueError) as error:
+                    raise NoSpeechDetected
+            except httpx.HTTPError as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
                 await self._state.set_message("语音识别暂时不可用，请稍后重试")
                 raise DeviceTranscriptionUnavailable from error
-
+            except NoSpeechDetected as error:
+                timing.fail("asr", error)
+                await self._state.transition(GuidePhase.ERROR)
+                await self._state.set_message("未识别到有效语音，请重试")
+                raise
             finally:
                 timing.finish_asr()
             await self._state.set_transcript(transcript)
@@ -140,6 +172,16 @@ class DeviceVoiceSession:
 
     async def finish_playback(self) -> None:
         await self._controller.finish_playback()
+
+    async def fail_playback(self) -> None:
+        if self._state.snapshot.phase is GuidePhase.SPEAKING:
+            await self._state.transition(GuidePhase.ERROR)
+        await self._state.set_message("扬声器播放失败，请检查默认输出设备")
+
+    async def fail_recording(self, message: str) -> None:
+        if self._state.snapshot.phase is GuidePhase.RECORDING:
+            await self._state.transition(GuidePhase.ERROR)
+        await self._state.set_message(message)
 
     async def reset(self) -> None:
         if self._turn_lock.locked():

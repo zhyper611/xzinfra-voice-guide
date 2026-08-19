@@ -90,6 +90,18 @@ class GuideStateStore:
                 message="正在查询展项资料",
             )
 
+    async def start_recording(self) -> GuideSnapshot:
+        async with self._lock:
+            current = self._snapshot.phase
+            if GuidePhase.RECORDING not in ALLOWED[current]:
+                raise InvalidStateTransition(f"不能从 {current} 开始录音")
+            return self._update_locked(
+                phase=GuidePhase.RECORDING,
+                transcript="",
+                answer="",
+                message="正在录音，再次点击后提交",
+            )
+
     async def set_transcript(self, transcript: str) -> GuideSnapshot:
         return await self._update(transcript=transcript)
 
