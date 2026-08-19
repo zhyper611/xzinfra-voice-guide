@@ -1,8 +1,12 @@
 import asyncio
+import io
 import logging
+import math
 import os
 import signal
+import struct
 import tempfile
+import wave
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -11,6 +15,40 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 ProcessFactory = Callable[..., Awaitable[asyncio.subprocess.Process]]
+
+
+def _create_chirp_wav(
+    *,
+    sample_rate: int,
+    start_frequency: float,
+    end_frequency: float,
+    duration_seconds: float = 0.12,
+) -> bytes:
+    frame_count = round(sample_rate * duration_seconds)
+    fade_frames = max(1, round(sample_rate * 0.01))
+    amplitude = round(32767 * 0.25)
+    phase = 0.0
+    frames = bytearray()
+
+    for index in range(frame_count):
+        progress = index / max(1, frame_count - 1)
+        frequency = start_frequency + (end_frequency - start_frequency) * progress
+        phase += 2 * math.pi * frequency / sample_rate
+        envelope = min(
+            1.0,
+            index / fade_frames,
+            (frame_count - 1 - index) / fade_frames,
+        )
+        sample = round(amplitude * envelope * math.sin(phase))
+        frames.extend(struct.pack("<h", sample))
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(frames)
+    return output.getvalue()
 
 
 class LocalAudioError(RuntimeError):
@@ -43,6 +81,16 @@ class LocalAudioController:
         self._record_process: asyncio.subprocess.Process | None = None
         self._recording_path: Path | None = None
         self._playback_process: asyncio.subprocess.Process | None = None
+        self._start_cue = _create_chirp_wav(
+            sample_rate=sample_rate,
+            start_frequency=700,
+            end_frequency=1000,
+        )
+        self._stop_cue = _create_chirp_wav(
+            sample_rate=sample_rate,
+            start_frequency=1000,
+            end_frequency=700,
+        )
 
     @property
     def is_recording(self) -> bool:
@@ -159,6 +207,12 @@ class LocalAudioController:
                 raise LocalAudioError("扬声器播放失败，请检查默认输出")
         finally:
             self._playback_process = None
+
+    async def play_start_cue(self) -> None:
+        await self.play(self._start_cue)
+
+    async def play_stop_cue(self) -> None:
+        await self.play(self._stop_cue)
 
     async def stop_playback(self) -> None:
         process = self._playback_process

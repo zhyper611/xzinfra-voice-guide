@@ -65,6 +65,8 @@ class FakeSession:
 class FakeAudio:
     def __init__(self, captured=None) -> None:
         self.captured = captured or make_wav()
+        self.play_start_cue = AsyncMock()
+        self.play_stop_cue = AsyncMock()
         self.start_recording = AsyncMock()
         self.stop_recording = AsyncMock(return_value=self.captured)
         self.abort_recording = AsyncMock()
@@ -83,6 +85,8 @@ async def test_start_stop_processes_and_plays_in_order():
     events = []
     session = FakeSession()
     audio = FakeAudio()
+    audio.play_start_cue.side_effect = lambda: events.append("start-cue")
+    audio.play_stop_cue.side_effect = lambda: events.append("stop-cue")
     audio.start_recording.side_effect = lambda: events.append("audio-start")
 
     async def begin_recording():
@@ -113,16 +117,76 @@ async def test_start_stop_processes_and_plays_in_order():
 
     assert snapshot.phase is GuidePhase.RECORDING
     assert result is session.result
-    assert events == [
-        "audio-start",
-        "state-recording",
-        "audio-stop",
-        "pipeline",
-        "play",
-        "finished",
-    ]
+    assert events.index("start-cue") < events.index("audio-start")
+    assert events.index("audio-start") < events.index("state-recording")
+    assert events.index("audio-stop") < events.index("stop-cue")
+    assert events.index("audio-stop") < events.index("pipeline")
+    assert events.index("stop-cue") < events.index("play")
+    assert events.index("pipeline") < events.index("play")
+    assert events.index("play") < events.index("finished")
     session.get_audio.assert_called_once_with("audio-id")
     assert not workflow.is_recording
+
+
+@pytest.mark.asyncio
+async def test_stop_cue_runs_with_pipeline_and_finishes_before_answer_playback():
+    pipeline_started = asyncio.Event()
+    release_pipeline = asyncio.Event()
+    cue_started = asyncio.Event()
+    release_cue = asyncio.Event()
+    session = FakeSession()
+    audio = FakeAudio()
+
+    async def process_recorded(source):
+        pipeline_started.set()
+        await release_pipeline.wait()
+        return session.result
+
+    async def play_stop_cue():
+        cue_started.set()
+        await release_cue.wait()
+
+    session.process_recorded_wav.side_effect = process_recorded
+    audio.play_stop_cue.side_effect = play_stop_cue
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    stopping = asyncio.create_task(workflow.stop_recording())
+    await asyncio.wait_for(pipeline_started.wait(), timeout=0.2)
+    await asyncio.wait_for(cue_started.wait(), timeout=0.2)
+
+    release_pipeline.set()
+    await asyncio.sleep(0)
+    audio.play.assert_not_awaited()
+
+    release_cue.set()
+    await stopping
+    await let_background_tasks_run()
+
+    audio.play.assert_awaited_once_with(make_wav())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_cue", ["play_start_cue", "play_stop_cue"])
+async def test_cue_failure_does_not_block_the_device_pipeline(failing_cue):
+    session = FakeSession(
+        DeviceTurnResult(
+            transcript="问题",
+            answer="文字答案",
+            audio_id=None,
+        )
+    )
+    audio = FakeAudio()
+    getattr(audio, failing_cue).side_effect = LocalAudioError("cue failed")
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    result = await workflow.stop_recording()
+
+    assert result is session.result
+    audio.play_start_cue.assert_awaited_once_with()
+    audio.play_stop_cue.assert_awaited_once_with()
+    session.process_recorded_wav.assert_awaited_once_with(make_wav())
 
 
 @pytest.mark.asyncio
@@ -199,6 +263,7 @@ async def test_playback_failure_updates_device_state():
 @pytest.mark.asyncio
 async def test_timeout_uses_the_same_stop_pipeline():
     processed = asyncio.Event()
+    finished = asyncio.Event()
     session = FakeSession(
         DeviceTurnResult(
             transcript="问题",
@@ -211,7 +276,12 @@ async def test_timeout_uses_the_same_stop_pipeline():
         processed.set()
         return session.result
 
+    async def finish_playback():
+        await session._finish_playback()
+        finished.set()
+
     session.process_recorded_wav.side_effect = process_recorded
+    session.finish_playback.side_effect = finish_playback
     audio = FakeAudio()
     workflow = LocalDeviceWorkflow(
         session=session,
@@ -221,6 +291,7 @@ async def test_timeout_uses_the_same_stop_pipeline():
 
     await workflow.start_recording()
     await asyncio.wait_for(processed.wait(), timeout=0.2)
+    await asyncio.wait_for(finished.wait(), timeout=0.2)
 
     audio.stop_recording.assert_awaited_once_with()
     session.finish_playback.assert_awaited_once_with()

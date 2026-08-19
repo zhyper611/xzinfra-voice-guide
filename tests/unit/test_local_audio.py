@@ -150,6 +150,35 @@ async def test_non_default_targets_are_passed_as_arguments():
 
 
 @pytest.mark.asyncio
+async def test_recording_cues_are_valid_distinct_wav_chirps():
+    processes = []
+
+    async def process_factory(*args, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    controller = LocalAudioController(
+        sample_rate=16000,
+        process_factory=process_factory,
+    )
+
+    await controller.play_start_cue()
+    await controller.play_stop_cue()
+
+    start_cue = processes[0].communicated_input
+    stop_cue = processes[1].communicated_input
+    assert start_cue != stop_cue
+
+    for cue in (start_cue, stop_cue):
+        with wave.open(io.BytesIO(cue), "rb") as source:
+            assert source.getnchannels() == 1
+            assert source.getsampwidth() == 2
+            assert source.getframerate() == 16000
+            assert source.getnframes() == 1920
+
+
+@pytest.mark.asyncio
 async def test_rejects_duplicate_recording_and_stop_without_recording():
     async def process_factory(*args, **kwargs):
         Path(args[-1]).write_bytes(make_wav())

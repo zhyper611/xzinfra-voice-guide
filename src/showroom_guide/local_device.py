@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import wave
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from enum import StrEnum
 
@@ -48,6 +49,7 @@ class LocalDeviceWorkflow:
         self._lifecycle_lock = asyncio.Lock()
         self._timeout_task: asyncio.Task[None] | None = None
         self._playback_task: asyncio.Task[None] | None = None
+        self._cue_task: asyncio.Task[None] | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -58,6 +60,10 @@ class LocalDeviceWorkflow:
             self._ensure_can_start()
             self._mode = LocalDeviceMode.RECORDING
             try:
+                await self._play_cue_safely(
+                    self._audio.play_start_cue,
+                    "start",
+                )
                 await self._audio.start_recording()
                 await self._session.begin_recording()
             except BaseException:
@@ -92,6 +98,7 @@ class LocalDeviceWorkflow:
             timeout_task = self._take_timeout_task()
             playback_task = self._playback_task
             self._playback_task = None
+            cue_task = self._take_cue_task()
 
         await self._cancel_task(timeout_task)
         if previous_mode is LocalDeviceMode.RECORDING:
@@ -101,6 +108,9 @@ class LocalDeviceWorkflow:
                 playback_task.cancel()
             await self._audio.stop_playback()
             await self._cancel_task(playback_task)
+        if cue_task is not None:
+            await self._audio.stop_playback()
+            await self._cancel_task(cue_task)
         try:
             await self._session.reset()
         finally:
@@ -113,11 +123,16 @@ class LocalDeviceWorkflow:
             timeout_task = self._take_timeout_task()
             playback_task = self._playback_task
             self._playback_task = None
+            cue_task = self._take_cue_task()
         await self._cancel_task(timeout_task)
         if playback_task is not None:
             playback_task.cancel()
+        if cue_task is not None:
+            await self._audio.stop_playback()
+            cue_task.cancel()
         await self._audio.aclose()
         await self._cancel_task(playback_task)
+        await self._cancel_task(cue_task)
         await self._session.clear()
         async with self._lifecycle_lock:
             self._mode = LocalDeviceMode.IDLE
@@ -135,11 +150,17 @@ class LocalDeviceWorkflow:
         if timeout_task is not current_task:
             await self._cancel_task(timeout_task)
 
+        cue_task = None
         try:
             captured = await self._audio.stop_recording()
+            cue_task = self._start_cue_task(
+                self._audio.play_stop_cue,
+                "stop",
+            )
             if self._wav_duration_seconds(captured) < self._min_recording_seconds:
                 raise InvalidDeviceAudio("录音时间过短，请重新录音")
         except (InvalidDeviceAudio, LocalAudioError) as error:
+            await self._wait_for_cue(cue_task)
             await self._session.fail_recording(str(error))
             async with self._lifecycle_lock:
                 self._mode = LocalDeviceMode.IDLE
@@ -148,9 +169,12 @@ class LocalDeviceWorkflow:
         try:
             result = await self._session.process_recorded_wav(captured)
         except BaseException:
+            await self._wait_for_cue(cue_task)
             async with self._lifecycle_lock:
                 self._mode = LocalDeviceMode.IDLE
             raise
+
+        await self._wait_for_cue(cue_task)
 
         if result.audio_id is None:
             await self._session.finish_playback()
@@ -203,6 +227,46 @@ class LocalDeviceWorkflow:
         task = self._timeout_task
         self._timeout_task = None
         return task
+
+    def _start_cue_task(
+        self,
+        cue: Callable[[], Awaitable[None]],
+        cue_name: str,
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(
+            self._play_cue_safely(cue, cue_name),
+            name=f"local-{cue_name}-cue",
+        )
+        self._cue_task = task
+        return task
+
+    async def _wait_for_cue(self, task: asyncio.Task[None] | None) -> None:
+        if task is None:
+            return
+        try:
+            await task
+        finally:
+            if self._cue_task is task:
+                self._cue_task = None
+
+    def _take_cue_task(self) -> asyncio.Task[None] | None:
+        task = self._cue_task
+        self._cue_task = None
+        return task
+
+    @staticmethod
+    async def _play_cue_safely(
+        cue: Callable[[], Awaitable[None]],
+        cue_name: str,
+    ) -> None:
+        try:
+            await cue()
+        except Exception:
+            logger.warning(
+                "local_audio_cue_failed",
+                extra={"cue": cue_name},
+                exc_info=True,
+            )
 
     @staticmethod
     async def _cancel_task(task: asyncio.Task[None] | None) -> None:
