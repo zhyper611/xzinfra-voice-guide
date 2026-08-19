@@ -21,6 +21,10 @@ class DeviceTranscriptionUnavailable(RuntimeError):
     pass
 
 
+class NoSpeechDetected(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class DeviceTurnResult:
     transcript: str
@@ -137,18 +141,17 @@ class DeviceVoiceSession:
             try:
                 transcript = (await self._speech.transcribe(io.BytesIO(audio))).strip()
                 if not transcript:
-                    raise ValueError("ASR returned an empty transcription")
+                    raise NoSpeechDetected
             except httpx.HTTPError as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
                 await self._state.set_message("语音识别暂时不可用，请稍后重试")
                 raise DeviceTranscriptionUnavailable from error
-            except ValueError as error:
+            except NoSpeechDetected as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
                 await self._state.set_message("未识别到有效语音，请重试")
-                raise DeviceTranscriptionUnavailable from error
-
+                raise
             finally:
                 timing.finish_asr()
             await self._state.set_transcript(transcript)

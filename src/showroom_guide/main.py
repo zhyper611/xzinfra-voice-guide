@@ -36,6 +36,7 @@ from showroom_guide.device import (
     DeviceTurnResult,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    NoSpeechDetected,
 )
 from showroom_guide.local_audio import LocalAudioController, LocalAudioError
 from showroom_guide.local_device import LocalDeviceWorkflow
@@ -264,6 +265,11 @@ def create_app(runtime: Runtime) -> FastAPI:
         except QuestionInProgress as error:
             detail = str(error) or busy_detail
             raise HTTPException(status_code=409, detail=detail) from error
+        except NoSpeechDetected as error:
+            raise HTTPException(
+                status_code=422,
+                detail="未识别到有效语音，请重试",
+            ) from error
         except DeviceTranscriptionUnavailable as error:
             raise HTTPException(
                 status_code=503,

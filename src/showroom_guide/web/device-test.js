@@ -43,6 +43,7 @@ const phaseLabels = {
   degraded: "服务降级",
   error: "出现错误",
 };
+const NO_SPEECH_MESSAGE = "未识别到有效语音，请重试";
 
 let audioObjectUrl = null;
 let pollTimer = null;
@@ -128,6 +129,9 @@ function renderState(snapshot) {
   currentPhase = snapshot.phase || "idle";
   phasePill.dataset.phase = currentPhase;
   phase.textContent = phaseLabels[currentPhase] || "处理中";
+  if (currentPhase === "error" && snapshot.message === NO_SPEECH_MESSAGE) {
+    phase.textContent = "未检测到语音";
+  }
   statusMessage.textContent = snapshot.message || "设备状态已更新";
   transcript.textContent = snapshot.transcript || "尚未识别";
   answer.textContent = snapshot.answer || "回答会显示在这里";

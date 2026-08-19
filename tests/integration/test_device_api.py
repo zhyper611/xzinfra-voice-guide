@@ -11,6 +11,7 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceTurnResult,
     InvalidDeviceAudio,
+    NoSpeechDetected,
 )
 from showroom_guide.main import create_app
 from showroom_guide.local_audio import LocalAudioError
@@ -202,6 +203,7 @@ def test_device_turn_rejects_oversized_upload_before_processing():
     [
         (InvalidDeviceAudio("WAV 参数错误"), 415, "WAV 参数错误"),
         (QuestionInProgress(), 409, "已有设备问题正在处理中"),
+        (NoSpeechDetected(), 422, "未识别到有效语音，请重试"),
         (DeviceTranscriptionUnavailable(), 503, "语音识别暂时不可用，请稍后重试"),
         (GuideServiceUnavailable("xzkb"), 503, "知识库暂时不可用，请稍后重试"),
         (GuideServiceUnavailable("capacity"), 503, "当前使用人数较多，请稍后重试"),
@@ -271,6 +273,12 @@ def test_local_recording_start_and_stop_return_device_state_and_turn():
             InvalidDeviceAudio("录音时间过短，请重新录音"),
             415,
             "录音时间过短，请重新录音",
+        ),
+        (
+            "/api/device/recording/stop",
+            NoSpeechDetected(),
+            422,
+            "未识别到有效语音，请重试",
         ),
     ],
 )

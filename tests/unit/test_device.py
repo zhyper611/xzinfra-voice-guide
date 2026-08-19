@@ -13,6 +13,7 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    NoSpeechDetected,
     validate_wav,
 )
 from showroom_guide.models import GuidePhase
@@ -174,12 +175,14 @@ async def test_asr_failure_enters_error_and_allows_next_turn():
 @pytest.mark.asyncio
 async def test_empty_transcript_has_actionable_message():
     speech = TrackingSpeech(["   "])
-    session, state, _, _ = make_session(speech)
+    session, state, xzkb, speech = make_session(speech)
 
-    with pytest.raises(DeviceTranscriptionUnavailable):
+    with pytest.raises(NoSpeechDetected):
         await session.process_wav(make_wav())
 
     assert state.snapshot.message == "未识别到有效语音，请重试"
+    assert xzkb.messages == []
+    assert speech.synthesized_text == []
 
 
 @pytest.mark.asyncio

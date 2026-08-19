@@ -147,6 +147,8 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'localRecordLabel.textContent = "结束并提交"' in response.text
     assert 'inputMode === "microphone" && currentPhase === "speaking"' in response.text
     assert 'audioHint.textContent = "正在由树莓派扬声器播放"' in response.text
+    assert 'const NO_SPEECH_MESSAGE = "未识别到有效语音，请重试"' in response.text
+    assert 'phase.textContent = "未检测到语音"' in response.text
 
 
 def test_index_uses_local_xzinfra_brand_assets():
