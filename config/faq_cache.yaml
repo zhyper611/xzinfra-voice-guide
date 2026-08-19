@@ -1,0 +1,445 @@
+schema_version: 1
+source_document: 调推中心解说词_知识库优化分段.md
+rule_excludes:
+  - 当前
+  - 现在
+  - 今天
+  - 实时
+  - 最新
+  - 使用率
+  - 利用率
+  - 温度
+  - 能耗
+  - PUE
+  - 告警
+  - 状态
+  - 对比
+  - 比较
+  - 区别
+  - 不同
+  - 改写
+  - 重写
+  - 总结成
+  - 一句话
+  - 英文
+  - 翻译
+  - 换一种说法
+  - 不要
+  - 不用
+  - 无需
+
+# aliases 仅用于匹配完整问题，不建议使用包含匹配。
+# 修改 answer、TTS 模型、音色或语速后，应递增 version 并重新生成 audio_file。
+entries:
+  - id: center_overview
+    title: 调推智算中心整体介绍
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 介绍一下调推中心
+      - 调推智算中心是做什么的
+      - 这里有哪些展区
+      - 整个中心介绍一下
+      - 参观路线是什么
+      - 调推中心都有什么
+    answer: >-
+      欢迎来到天津市滨海高新区公共调推智算中心。这里展示的不是一个单点 AI 产品，而是一套帮助企业把 AI 从“能演示”变成“能干活、能落地、能持续创造价值”的完整体系。参观内容包括介绍视频、硬件产品区、AI 工厂八大车间、行业案例墙、智能运维大屏，以及机房、算电协同和室外设施。整条路线从底层算力和模型出发，经过数据、知识、研究、代码、创意和 Agent 组装，最终形成企业可以直接使用的智能应用。
+    audio_file: prepared_audio/center_overview.wav
+
+  - id: core_concept
+    title: 开场与核心理念
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 你们的核心理念是什么
+      - 为什么要建设调推中心
+      - AI 为什么难落地
+      - 企业 AI 为什么不能只靠模型
+      - 这里主要解决什么问题
+    answer: >-
+      欢迎来到天津市滨海高新区公共调推智算中心。今天几乎所有企业都在谈 AI，但很多 AI 项目看起来很美，真正落地却很难。企业即使投入大量资金购买算力和模型，也可能只得到一个“能演示、不能干活”的系统。我们希望通过今天的参观说明，真正能够为企业持续创造价值的 AI，从来不是一个单点产品，而是一整套完整的体系能力。
+    audio_file: prepared_audio/core_concept.wav
+
+  - id: ai_generated_video
+    title: 视频大屏与 AI 生成能力
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 刚才的视频是怎么做的
+      - 介绍视频是 AI 生成的吗
+      - 视频大屏展示什么
+      - 这个视频是谁制作的
+      - AI 能完成视频制作吗
+    answer: >-
+      参观开始时，我们会通过大屏播放一段介绍视频，帮助大家快速了解调推智算中心的整体理念和能力定位。值得注意的是，这段视频从文案撰写、画面生成到配音和剪辑，全部由我们自己的 AI 系统完成。它直观展示了 AI 在内容策划、视觉生成、语音合成和视频制作方面的综合能力。
+    audio_file: prepared_audio/ai_generated_video.wav
+
+  - id: domestic_compute_optimization
+    title: 硬件产品区国产算力适配与优化
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下硬件产品区
+      - 你们怎么做国产算力适配
+      - 国产芯片怎么进行优化
+      - 算力优化是怎么做的
+      - 国产算力有什么特点
+    answer: >-
+      硬件产品区展示的是调推智算中心的底层算力基础。面对大模型架构和芯片体系的快速发展，我们将不同类型的国产芯片整合起来，并进行加速、调优、适配和优化。这样可以在同等硬件和能耗条件下产生更多 Token，提高算力利用效率，也为企业提供更加自主可控的 AI 基础设施。
+    audio_file: prepared_audio/domestic_compute_optimization.wav
+
+  - id: pd_disaggregation
+    title: PD 分离技术
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 什么是 PD 分离
+      - 介绍一下 PD 分离技术
+      - PD 分离有什么作用
+      - Prefill 和 Decode 为什么要分离
+      - PD 分离能提升多少性能
+      - 你们怎么提升大模型推理性能
+    answer: >-
+      PD 分离是我们的核心优化技术之一。大模型生成过程主要包含 Prefill 和 Decode 两个关键阶段，PD 分离技术将这两个阶段解耦，并针对不同负载分别进行优化，从而显著提升硬件的推理性能。根据现有测试数据，经过 PD 分离调优的算力，相比未经优化的原生算力可获得五倍以上的性能提升，也就是说，企业投入同样的资金，可以获得更高的 AI 服务能力。
+    audio_file: prepared_audio/pd_disaggregation.wav
+
+  - id: appliance_and_gateway
+    title: AI 推训一体机与大模型网关
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 你们有哪些硬件产品
+      - 介绍一下推训一体机
+      - 什么是大模型网关
+      - 大模型网关有什么作用
+      - 一体机和网关介绍一下
+      - 你们的核心产品有哪些
+    answer: >-
+      针对不同规模企业的需求，我们提供大、中、小型 AI 推训一体机，支持开箱即用和快速部署。同时，我们还提供兼具模型转发和安全防护能力的大模型网关。它既能统一管理不同模型的调用入口，也能对企业数据进行安全保护。通过这些产品，底层复杂的硬件、模型和安全能力可以被封装成业务部门能够直接使用的服务。
+    audio_file: prepared_audio/appliance_and_gateway.wav
+
+  - id: eight_workshops_overview
+    title: AI 工厂八大车间整体介绍
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 介绍一下八大车间
+      - 八大车间有哪些
+      - 八个车间分别做什么
+      - AI 工厂有哪些车间
+      - 讲讲八大车间
+      - 八大车间都有什么
+      - AI 工厂是怎么组成的
+      - 介绍八大车间
+      - AI 工厂都有哪些车间
+    match_rules:
+      subjects:
+        - 八大车间
+        - 八个车间
+        - AI 工厂车间
+        - AI 工厂的车间
+      intents:
+        - 介绍
+        - 讲讲
+        - 讲一讲
+        - 说说
+        - 了解
+        - 有哪些
+        - 都有什么
+        - 分别做什么
+        - 怎么组成
+      excludes:
+        - 案例
+        - 视频
+        - 图片
+    answer: >-
+      欢迎来到 AI 工厂。八大车间共同组成了一条企业级 AI 生产线：算力车间统一管理算力和模型；数据精炼厂把企业数据转化为洞察；知识铸造炉把零散资料沉淀为知识资产；深思实验室负责研究、分析和学习；代码车间把需求转化为网页、脚本和工具；创意车间生成并处理视觉内容；Agent 总装车间把前面的能力组装成能够执行任务的智能体；交互大厅则把所有能力变成用户可以实时对话和使用的统一入口。这八个车间层层衔接，完成了企业 AI 从底层资源到最终应用的完整过程。
+    audio_file: prepared_audio/eight_workshops_overview.wav
+
+  - id: compute_workshop
+    title: AI 工厂第一站算力车间
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 算力车间是做什么的
+      - 介绍一下算力车间
+      - 第一站是什么车间
+      - 算力车间有什么作用
+      - 算力和模型怎么管理
+    answer: >-
+      算力车间是 AI 工厂的第一站，也是整座 AI 工厂的动力中心。无论是知识问答、数据分析还是智能体运行，都需要这里提供算力和模型支撑。算力车间负责底层硬件、推理引擎和模型的适配，并对算力与模型进行统一纳管和统一调度，把复杂的底层资源封装成简单易用的上层能力。它解决的核心问题，就是让 AI 跑起来，而且还要跑得稳定。
+    audio_file: prepared_audio/compute_workshop.wav
+
+  - id: data_refinery
+    title: AI 工厂第二站数据精炼厂
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 数据精炼厂是做什么的
+      - 介绍一下数据精炼厂
+      - 数据车间有什么作用
+      - 第二站是什么车间
+      - 怎么用自然语言查询数据
+      - 这里能自动生成数据看板吗
+    answer: >-
+      数据精炼厂是 AI 工厂的第二站，主要处理订单、销售、库存、客户和财务等企业结构化数据。业务人员不需要编写 SQL，也不必反复找技术团队取数，只要像聊天一样提问，系统就能给出结果和图表。这里还支持归因分析和动态数据看板，能够拆解指标波动原因并灵活探索数据。它的核心价值，是把企业数据真正提炼成洞察和决策依据。
+    audio_file: prepared_audio/data_refinery.wav
+
+  - id: knowledge_furnace
+    title: AI 工厂第三站知识铸造炉
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 知识铸造炉是做什么的
+      - 介绍一下知识铸造炉
+      - 知识车间有什么作用
+      - 第三站是什么车间
+      - 企业资料怎么变成知识库
+      - 知识库里的答案可以溯源吗
+    answer: >-
+      知识铸造炉是 AI 工厂的第三站，主要处理企业中的文档、制度、手册、报告、方案、会议纪要、图片和网页等非结构化或半结构化资料。它把零散、杂乱的企业资料重新加工，沉淀成能够查找、可信并可复用的知识资产。基于这些知识，还可以构建设备运维、金相图片分析和复杂失效报告生成等工业智能应用，让知识真正做到能找、能信、能用。
+    audio_file: prepared_audio/knowledge_furnace.wav
+
+  - id: deep_thought_lab
+    title: AI 工厂第四站深思实验室
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 深思实验室是做什么的
+      - 介绍一下深思实验室
+      - 研究学习车间有什么作用
+      - 第四站是什么车间
+      - AI 怎么进行深度研究
+      - 深思课堂能做什么
+    answer: >-
+      深思实验室是 AI 工厂的第四站，让 AI 从查资料、答问题进一步升级为能够研究和学习。面对行业趋势、技术方向等复杂问题，它可以围绕主题查找和组织相关信息，完成归纳、分析和总结，最终形成带有来源的结构化研究成果。对于企业内部的新知识，它还可以快速整理成课程和课件，用于培训、学习和互动。这里让知识不只是被保存，还能继续被研究、被学习、被传递。
+    audio_file: prepared_audio/deep_thought_lab.wav
+
+  - id: code_workshop
+    title: AI 工厂第五站代码车间
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 代码车间是做什么的
+      - 介绍一下代码车间
+      - 第五站是什么车间
+      - AI 在这里能写代码吗
+      - 代码车间能生成什么
+      - AI 能快速搭建网页吗
+    answer: >-
+      代码车间是 AI 工厂的第五站，相当于给 AI 装上一双能够做事的手。用户提出一个需求后，AI 可以快速把想法转化为网页、脚本、小工具，甚至一段完整功能。企业可以先让 AI 快速搭建初始版本，再由人员审核和优化，从而缩短验证周期，加快业务落地。代码车间解决的核心问题，是让 AI 不只会说，还真正具备动手实现的能力。
+    audio_file: prepared_audio/code_workshop.wav
+
+  - id: creative_workshop
+    title: AI 工厂第六站创意车间
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 创意车间是做什么的
+      - 介绍一下创意车间
+      - 第六站是什么车间
+      - 这里可以生成图片吗
+      - 创意车间能生成哪些素材
+      - AI 能制作海报和 PPT 素材吗
+    answer: >-
+      创意车间是 AI 工厂的第六站，主要满足企业在视觉内容方面的需求。这里可以快速生成 Logo、海报、宣传图、PPT 素材和风格统一的图片，也可以进行图片处理与二次加工。生成结果不只是一次性使用，还能继续沉淀到企业自己的素材库中持续复用。它的核心价值，是把创意更快变成作品，再把作品沉淀成企业资产。
+    audio_file: prepared_audio/creative_workshop.wav
+
+  - id: agent_assembly
+    title: AI 工厂第七站 Agent 总装车间
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - Agent 总装车间是做什么的
+      - 介绍一下总装车间
+      - 第七站是什么车间
+      - 什么是 Agent 总装
+      - 智能体是怎么组装出来的
+      - AI 怎么从聊天变成做事
+    answer: >-
+      Agent 总装车间是 AI 工厂的第七站，也是把各项能力真正组合起来的关键环节。前面的算力、数据、知识、代码和创意能力，就像已经准备好的零部件；总装车间负责把它们组装成完整的 Agent。用户交给 Agent 一个任务后，它不只是回复一段文字，还会主动查询知识、调用工具、串联流程并逐步完成工作。这里让 AI 从“会聊天”升级为“会做事”的数字助手。
+    audio_file: prepared_audio/agent_assembly.wav
+
+  - id: interaction_hall
+    title: AI 工厂第八站交互大厅
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 交互大厅是做什么的
+      - 介绍一下交互大厅
+      - 第八站是什么车间
+      - 交互大厅有什么作用
+      - 用户怎么使用 AI 工厂
+      - 这里为什么叫交互大厅
+    answer: >-
+      交互大厅是 AI 工厂的第八站，也是前面七个车间成果最终与用户见面的地方。用户在这里看到的是一个能够实时对话、实时理解并实时执行任务的智能体。它看起来只是一个助手，背后连接的却是算力、数据、知识、研究、代码、创意和 Agent 组装等整座 AI 工厂的能力。交互大厅把这些复杂能力最终变成了人人都能直接使用的统一入口。
+    audio_file: prepared_audio/interaction_hall.wav
+
+  - id: case_wall_overview
+    title: 案例墙整体介绍
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 介绍一下案例墙
+      - 案例墙有哪些案例
+      - 你们有哪些落地案例
+      - AI 工厂有哪些应用成果
+      - 展示了哪些行业案例
+    answer: >-
+      案例墙集中展示了调推智算中心和 AI 工厂形成的实际应用成果。目前包括芯片行业的微纳核芯案例、工业领域的金相分析案例、企业智能办公案例，以及高校教育场景案例。这些案例分别展示了 AI 在芯片设计、工业经验沉淀、办公效率提升和教育数字化方面的落地价值，也说明算力、模型、数据、知识库和智能体能力可以根据不同行业需求进行组合。
+    audio_file: prepared_audio/case_wall_overview.wav
+
+  - id: chip_case
+    title: 芯片行业微纳核芯案例
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下微纳核芯案例
+      - 芯片行业案例是什么
+      - AI 怎么应用于芯片设计
+      - EDA 芯片设计应用是什么
+      - 芯片企业为什么要私有化部署
+    answer: >-
+      芯片行业案例来自杭州微纳核芯。我们为企业搭建了私有化部署的算力模型平台，提供企业私域 AI 基础设施和统一的模型调用入口，并在这个基础设施平台上建设 EDA 芯片设计应用。通过私有化 AI 能力赋能芯片设计与制造，不仅能够加快芯片设计生产流程，私有化部署形成的闭环模式也可以保护企业核心数据和信息安全。
+    audio_file: prepared_audio/chip_case.wav
+
+  - id: metallography_case
+    title: 工业行业金相分析案例
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下金相分析案例
+      - 工业行业案例是什么
+      - AI 怎么进行金相分析
+      - 失效分析智能体能做什么
+      - 老师傅的经验怎么沉淀
+    answer: >-
+      工业行业案例聚焦金相分析领域。我们基于长期积累的经验数据训练工业金相分析垂类大模型，再结合行业专业知识库，打造金相分析和失效案例分析报告智能体。这个智能体可以把老师傅多年积累的经验转化为可复用的 AI 资产，解决工业经验难以高效传承、难以沉淀为数字化资产的问题。
+    audio_file: prepared_audio/metallography_case.wav
+
+  - id: office_case
+    title: 企业智能办公案例
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下智能办公案例
+      - AI 怎么应用于企业办公
+      - 办公场景有哪些智能助手
+      - AI 能生成会议纪要吗
+      - 企业知识库怎么支持办公
+    answer: >-
+      企业智能办公案例由算力、模型、企业历史数据和资料知识库共同构成私有化 AI 底座。在这个底座上，可以建设咨询报告生成、会议纪要、法务和招聘等智能助手，让 AI 服务于企业内部办公的多个业务环节。它的主要价值，是在保护企业私域数据的同时，提高资料处理、内容生成和内部协作效率。
+    audio_file: prepared_audio/office_case.wav
+
+  - id: education_case
+    title: 高校教育场景案例
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下高校教育案例
+      - AI 怎么应用于高校教育
+      - 教育场景如何保证安全合规
+      - AI 能帮助教师备课吗
+      - 校园内网怎么部署大模型
+    answer: >-
+      高校教育案例是在校园内网中搭建安全合规、贴合教育场景的大模型基础设施。通过打通硬件算力和大模型，并结合知识库系统，可以形成覆盖教学与管理场景的 AI 教育体系。在满足高校安全合规要求的基础上，这套体系能够提高教学和教师备课效率，支持个性化教学，也为学校后续扩展更多 AI 业务提供统一基础设施。
+    audio_file: prepared_audio/education_case.wav
+
+  - id: operations_dashboard
+    title: 智能运维助手与运维大屏
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 介绍一下运维大屏
+      - 小新是什么
+      - 智能运维助手能做什么
+      - 运维大厅展示哪些内容
+      - 怎么查看算力中心运行情况
+      - 运维人员怎么使用 AI
+    answer: >-
+      智能运维助手“小新”可以通过自然语言帮助运维人员了解算力中心的实时运行情况。运维大厅的大屏集中展示智算中心的算力使用情况、Token 消耗量、散热系统三维动态和知识库存储情况。通过智能助手和可视化大屏，原本分散在不同系统中的运维信息可以被统一查询和清晰展示，相当于为运维人员配备了一名智能助理。具体的实时数值需要查询当前运维系统，不能使用固定答案代替。
+    audio_file: prepared_audio/operations_dashboard.wav
+
+  - id: infrastructure_overview
+    title: 机房算电协同与室外设施整体介绍
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下基础设施参观路线
+      - 机房和室外都展示什么
+      - 算电协同区域有哪些设施
+      - 基础设施有哪些部分
+      - 机房算电协同和室外设施介绍一下
+    answer: >-
+      基础设施参观路线包括机房、算电协同系统和室外设施。机房展示高密度风冷和全浸没式液冷方案；算电协同系统通过光伏、储能、微电网和配电设施保障智算中心高效、稳定用电；室外区域则展示 2N 配电站、液冷冷却塔、风冷室外机和储能设施。这些系统共同保障算力中心的散热效率、能源利用率和持续运行能力。
+    audio_file: prepared_audio/infrastructure_overview.wav
+
+  - id: cooling_solutions
+    title: 机房风冷与全浸没式液冷方案
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 介绍一下机房
+      - 风冷和液冷有什么区别
+      - 什么是全浸没式液冷
+      - 液冷方案有哪些优势
+      - 液冷缸里有多少台服务器
+      - 机房的 PUE 是多少
+    answer: >-
+      机房同时展示风冷和全浸没式液冷两种散热方案。风冷单个机柜的功率密度可达 30 kW，通过机柜之间的空调柜为整个通道散热。全浸没式液冷方案将 16 台服务器放入液冷缸中，单缸功率密度可达 120 kW，是传统风冷的四倍，PUE 可达到 1.08。缸内服务器支持单独吊装和热插拔，散热液体性质稳定、挥发性低，理论上十年内不需要补液或换液。
+    audio_file: prepared_audio/cooling_solutions.wav
+
+  - id: source_grid_load_storage
+    title: 算电协同源网荷储方案
+    enabled: true
+    priority: high
+    version: 1
+    aliases:
+      - 什么是算电协同
+      - 介绍一下源网荷储方案
+      - 光伏和储能怎么配合
+      - 微电网怎么削峰填谷
+      - 算电协同有什么作用
+      - 储能系统有多大容量
+    answer: >-
+      算电协同区域展示的是园区核心的源网荷储解决方案。园区计划建设每日供电量可达 1 MW 的光伏设施，可覆盖园区约三分之二的日用电需求；夜间利用谷电为储能系统充能，通过微电网实现削峰填谷。储能方案采用全浸没式液态锂电池，并配置 4 MW 储备能力。微电网配电站采用 2N 配置，以提高智算中心供电的可用性。
+    audio_file: prepared_audio/source_grid_load_storage.wav
+
+  - id: outdoor_facilities
+    title: 室外配电冷却与储能设施
+    enabled: true
+    priority: medium
+    version: 1
+    aliases:
+      - 介绍一下室外设施
+      - 室外参观主要看什么
+      - 2N 配电站是什么
+      - 冷却塔有什么作用
+      - 室外储能设施有什么作用
+      - 配电站如何保证不断电
+    answer: >-
+      室外区域首先展示 2N 配置的配电站，它由两台 2 MW 机组组成，任何一台机组出现故障，另一台都能接管全部负载，保障智算中心持续运行。旁边是液冷冷却塔和风冷空调室外机，液冷系统吸收的热量会在这里集中交换和散发。室外还配置了 4 MW 全浸没式锂电池储能系统，它既可以作为应急电源，也能参与微电网削峰填谷。
+    audio_file: prepared_audio/outdoor_facilities.wav

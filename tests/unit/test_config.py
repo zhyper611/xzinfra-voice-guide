@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from pydantic import ValidationError
 
 from showroom_guide.config import Settings
@@ -53,6 +54,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.audio_items_per_session == 3
     assert settings.device_api_key.get_secret_value() == "device-test-key"
     assert settings.device_max_upload_bytes == 10 * 1024 * 1024
+    assert settings.faq_cache_enabled is True
+    assert settings.faq_cache_file == Path("config/faq_cache.yaml")
     assert settings.local_recording_max_seconds == 60.0
     assert settings.local_recording_min_seconds == 0.5
 
@@ -72,6 +75,8 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     monkeypatch.setenv("GUIDE_XZKB_CONCURRENCY", "3")
     monkeypatch.setenv("GUIDE_TTS_CONCURRENCY", "1")
     monkeypatch.setenv("GUIDE_QUEUE_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("GUIDE_FAQ_CACHE_ENABLED", "false")
+    monkeypatch.setenv("GUIDE_FAQ_CACHE_FILE", "custom/faq-cache.yaml")
 
     settings = Settings(_env_file=None)
 
@@ -79,6 +84,8 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     assert settings.xzkb_concurrency == 3
     assert settings.tts_concurrency == 1
     assert settings.queue_timeout_seconds == 45.0
+    assert settings.faq_cache_enabled is False
+    assert settings.faq_cache_file == Path("custom/faq-cache.yaml")
 
 
 def test_settings_rejects_non_positive_device_upload_limit(monkeypatch):
