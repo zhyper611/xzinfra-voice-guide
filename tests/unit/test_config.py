@@ -53,6 +53,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.audio_items_per_session == 3
     assert settings.device_api_key.get_secret_value() == "device-test-key"
     assert settings.device_max_upload_bytes == 10 * 1024 * 1024
+    assert settings.local_recording_max_seconds == 60.0
+    assert settings.local_recording_min_seconds == 0.5
 
 
 def test_settings_reads_multi_user_overrides(monkeypatch):
@@ -126,3 +128,22 @@ def test_settings_requires_xzkb_empty_search_response(monkeypatch):
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_settings_rejects_recording_minimum_not_below_maximum():
+    with pytest.raises(ValidationError, match="最短录音时长必须小于最长录音时长"):
+        Settings(
+            _env_file=None,
+            xzkb_base_url="http://xzkb.test",
+            xzkb_api_key="test-key",
+            xzkb_empty_search_response="请询问展厅相关内容。",
+            asr_base_url="http://asr.test",
+            asr_api_key="asr-test-key",
+            asr_model="company-asr",
+            tts_base_url="http://tts.test",
+            tts_api_key="tts-test-key",
+            tts_model="company-tts",
+            device_api_key="device-test-key",
+            local_recording_min_seconds=60,
+            local_recording_max_seconds=60,
+        )

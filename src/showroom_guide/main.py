@@ -3,7 +3,7 @@ import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable
 
 from fastapi import (
     Depends,
@@ -33,9 +33,12 @@ from showroom_guide.controller import (
 )
 from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
+    DeviceTurnResult,
     DeviceVoiceSession,
     InvalidDeviceAudio,
 )
+from showroom_guide.local_audio import LocalAudioController, LocalAudioError
+from showroom_guide.local_device import LocalDeviceWorkflow
 from showroom_guide.models import GuideSnapshot
 from showroom_guide.sessions import (
     GuideSession,
@@ -78,6 +81,7 @@ class DeviceTurnResponse(BaseModel):
 class Runtime:
     sessions: SessionManager
     device: DeviceVoiceSession
+    local_device: LocalDeviceWorkflow
     device_api_key: SecretStr
     device_max_upload_bytes: int
     xzkb: XzkbClient
@@ -86,7 +90,7 @@ class Runtime:
 
     async def aclose(self) -> None:
         await self.sessions.clear()
-        await self.device.clear()
+        await self.local_device.aclose()
         await self.xzkb.aclose()
         await self.speech.aclose()
 
@@ -145,9 +149,20 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             ttl_seconds=configured.audio_ttl_seconds,
         ),
     )
+    local_device = LocalDeviceWorkflow(
+        session=device,
+        audio=LocalAudioController(
+            sample_rate=configured.sample_rate,
+            capture_device=configured.capture_device,
+            playback_device=configured.playback_device,
+        ),
+        max_recording_seconds=configured.local_recording_max_seconds,
+        min_recording_seconds=configured.local_recording_min_seconds,
+    )
     return Runtime(
         sessions=sessions,
         device=device,
+        local_device=local_device,
         device_api_key=configured.device_api_key,
         device_max_upload_bytes=configured.device_max_upload_bytes,
         xzkb=xzkb,
@@ -223,6 +238,47 @@ def create_app(runtime: Runtime) -> FastAPI:
         provided = (x_device_key or "").encode("utf-8")
         if not secrets.compare_digest(provided, expected):
             raise HTTPException(status_code=401, detail="设备凭证无效")
+
+    def device_turn_response(result: DeviceTurnResult) -> DeviceTurnResponse:
+        audio_url = (
+            f"/api/device/audio/{result.audio_id}"
+            if result.audio_id is not None
+            else None
+        )
+        return DeviceTurnResponse(
+            transcript=result.transcript,
+            answer=result.answer,
+            audio_url=audio_url,
+            warning=result.warning,
+        )
+
+    async def execute_device_turn(
+        operation: Awaitable[DeviceTurnResult],
+        *,
+        busy_detail: str = "已有设备问题正在处理中",
+    ) -> DeviceTurnResponse:
+        try:
+            result = await operation
+        except InvalidDeviceAudio as error:
+            raise HTTPException(status_code=415, detail=str(error)) from error
+        except QuestionInProgress as error:
+            detail = str(error) or busy_detail
+            raise HTTPException(status_code=409, detail=detail) from error
+        except DeviceTranscriptionUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="语音识别暂时不可用，请稍后重试",
+            ) from error
+        except GuideServiceUnavailable as error:
+            detail = (
+                "当前使用人数较多，请稍后重试"
+                if error.service == "capacity"
+                else "知识库暂时不可用，请稍后重试"
+            )
+            raise HTTPException(status_code=503, detail=detail) from error
+        except LocalAudioError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return device_turn_response(result)
 
     @app.get("/", include_in_schema=False)
     async def index(request: Request) -> FileResponse:
@@ -309,6 +365,31 @@ def create_app(runtime: Runtime) -> FastAPI:
         return runtime.device.metrics_snapshot()
 
     @app.post(
+        "/api/device/recording/start",
+        response_model=GuideSnapshot,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def start_device_recording() -> GuideSnapshot:
+        try:
+            return await runtime.local_device.start_recording()
+        except QuestionInProgress as error:
+            detail = str(error) or "设备正在处理上一轮录音"
+            raise HTTPException(status_code=409, detail=detail) from error
+        except LocalAudioError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.post(
+        "/api/device/recording/stop",
+        response_model=DeviceTurnResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def stop_device_recording() -> DeviceTurnResponse:
+        return await execute_device_turn(
+            runtime.local_device.stop_recording(),
+            busy_detail="设备正在处理上一轮录音",
+        )
+
+    @app.post(
         "/api/device/turn",
         response_model=DeviceTurnResponse,
         dependencies=[Depends(require_device_key)],
@@ -321,38 +402,8 @@ def create_app(runtime: Runtime) -> FastAPI:
         if len(audio) > runtime.device_max_upload_bytes:
             raise HTTPException(status_code=413, detail="录音文件过大")
 
-        try:
-            result = await runtime.device.process_wav(audio)
-        except InvalidDeviceAudio as error:
-            raise HTTPException(status_code=415, detail=str(error)) from error
-        except QuestionInProgress as error:
-            raise HTTPException(
-                status_code=409,
-                detail="已有设备问题正在处理中",
-            ) from error
-        except DeviceTranscriptionUnavailable as error:
-            raise HTTPException(
-                status_code=503,
-                detail="语音识别暂时不可用，请稍后重试",
-            ) from error
-        except GuideServiceUnavailable as error:
-            detail = (
-                "当前使用人数较多，请稍后重试"
-                if error.service == "capacity"
-                else "知识库暂时不可用，请稍后重试"
-            )
-            raise HTTPException(status_code=503, detail=detail) from error
-
-        audio_url = (
-            f"/api/device/audio/{result.audio_id}"
-            if result.audio_id is not None
-            else None
-        )
-        return DeviceTurnResponse(
-            transcript=result.transcript,
-            answer=result.answer,
-            audio_url=audio_url,
-            warning=result.warning,
+        return await execute_device_turn(
+            runtime.local_device.process_upload(audio)
         )
 
     @app.get(
@@ -386,7 +437,7 @@ def create_app(runtime: Runtime) -> FastAPI:
     )
     async def reset_device() -> Response:
         try:
-            await runtime.device.reset()
+            await runtime.local_device.reset()
         except QuestionInProgress as error:
             raise HTTPException(
                 status_code=409,
