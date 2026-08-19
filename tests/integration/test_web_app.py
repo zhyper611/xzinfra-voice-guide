@@ -74,6 +74,10 @@ def test_device_test_page_is_served_without_creating_visitor_session():
     assert response.status_code == 200
     assert "树莓派语音链路测试" in response.text
     assert 'id="device-key"' in response.text
+    assert 'id="local-record"' in response.text
+    assert 'id="local-record-label"' in response.text
+    assert 'data-mode="microphone"' in response.text
+    assert 'data-mode="wav"' in response.text
     assert 'id="wav-file"' in response.text
     assert 'id="device-audio"' in response.text
     assert 'id="latency-current-tab"' in response.text
@@ -102,6 +106,7 @@ def test_device_test_styles_are_branded_responsive_and_accessible():
     assert "@media (max-width: 760px)" in response.text
     assert "@media (prefers-reduced-motion: reduce)" in response.text
     assert ":focus-visible" in response.text
+    assert "button:disabled {\n  cursor: not-allowed;" in response.text
 
 
 def test_device_test_script_uses_protected_device_contract_without_persisting_key():
@@ -112,6 +117,8 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert response.status_code == 200
     assert 'headers.set("X-Device-Key", deviceKey.value.trim())' in response.text
     assert 'request("/api/device/turn"' in response.text
+    assert 'request("/api/device/recording/start"' in response.text
+    assert 'request("/api/device/recording/stop"' in response.text
     assert 'request("/api/device/state"' in response.text
     assert 'request("/api/device/metrics")' in response.text
     assert 'request(payload.audio_url' in response.text
@@ -136,6 +143,12 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert "innerHTML" not in response.text
     assert "if (!operationPending) clearError()" not in response.text
     assert 'if (error.message === "设备凭证无效") stopPolling()' in response.text
+    assert 'currentPhase === "recording"' in response.text
+    assert 'localRecordLabel.textContent = "结束并提交"' in response.text
+    assert 'inputMode === "microphone" && currentPhase === "speaking"' in response.text
+    assert 'audioHint.textContent = "正在由树莓派扬声器播放"' in response.text
+    assert 'const NO_SPEECH_MESSAGE = "未识别到有效语音，请重试"' in response.text
+    assert 'phase.textContent = "未检测到语音"' in response.text
 
 
 def test_index_uses_local_xzinfra_brand_assets():

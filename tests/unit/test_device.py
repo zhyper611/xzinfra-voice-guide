@@ -13,6 +13,7 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    NoSpeechDetected,
     validate_wav,
 )
 from showroom_guide.models import GuidePhase
@@ -127,6 +128,22 @@ async def test_process_wav_runs_full_pipeline_and_stores_audio():
 
 
 @pytest.mark.asyncio
+async def test_process_recorded_wav_does_not_repeat_recording_phase():
+    session, state, _, _ = make_session()
+    queue = state.subscribe()
+    await session.begin_recording()
+    await queue.get()
+
+    await session.process_recorded_wav(make_wav())
+
+    phases = []
+    while not queue.empty():
+        phases.append((await queue.get()).phase)
+    assert phases[0] is GuidePhase.TRANSCRIBING
+    assert GuidePhase.RECORDING not in phases
+
+
+@pytest.mark.asyncio
 async def test_process_wav_preserves_follow_up_context():
     speech = TrackingSpeech(["介绍展项甲", "它有什么特点？"])
     session, _, xzkb, _ = make_session(speech)
@@ -153,6 +170,19 @@ async def test_asr_failure_enters_error_and_allows_next_turn():
 
     assert state.snapshot.phase is GuidePhase.ERROR
     assert state.snapshot.message == "语音识别暂时不可用，请稍后重试"
+
+
+@pytest.mark.asyncio
+async def test_empty_transcript_has_actionable_message():
+    speech = TrackingSpeech(["   "])
+    session, state, xzkb, speech = make_session(speech)
+
+    with pytest.raises(NoSpeechDetected):
+        await session.process_wav(make_wav())
+
+    assert state.snapshot.message == "未识别到有效语音，请重试"
+    assert xzkb.messages == []
+    assert speech.synthesized_text == []
 
 
 @pytest.mark.asyncio

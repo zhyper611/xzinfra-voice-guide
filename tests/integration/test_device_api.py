@@ -11,8 +11,10 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceTurnResult,
     InvalidDeviceAudio,
+    NoSpeechDetected,
 )
 from showroom_guide.main import create_app
+from showroom_guide.local_audio import LocalAudioError
 from showroom_guide.models import GuidePhase, GuideSnapshot
 from showroom_guide.sessions import SessionManager
 
@@ -57,6 +59,16 @@ class FakeRuntime:
             audio_items_per_session=3,
         )
         self.device = FakeDevice()
+        self.local_device = MagicMock()
+        self.local_device.start_recording = AsyncMock(
+            return_value=GuideSnapshot(
+                phase=GuidePhase.RECORDING,
+                message="正在录音，再次点击后提交",
+            )
+        )
+        self.local_device.stop_recording = AsyncMock()
+        self.local_device.process_upload = AsyncMock()
+        self.local_device.reset = AsyncMock()
         self.device_api_key = SecretStr(DEVICE_KEY)
         self.device_max_upload_bytes = 1024
         self.cleanup_seconds = 60.0
@@ -73,6 +85,8 @@ def authorized_headers() -> dict[str, str]:
         ("get", "/api/device/state", {}),
         ("get", "/api/device/metrics", {}),
         ("post", "/api/device/turn", {"files": {"file": ("q.wav", make_wav())}}),
+        ("post", "/api/device/recording/start", {}),
+        ("post", "/api/device/recording/stop", {}),
         ("get", "/api/device/audio/audio-id", {}),
         ("post", "/api/device/playback-finished", {}),
         ("post", "/api/device/reset", {}),
@@ -128,7 +142,7 @@ def test_device_metrics_returns_protected_read_only_snapshot():
 
 def test_device_turn_returns_transcript_answer_and_audio_url():
     runtime = FakeRuntime()
-    runtime.device.process_wav.return_value = DeviceTurnResult(
+    runtime.local_device.process_upload.return_value = DeviceTurnResult(
         transcript="介绍展项甲",
         answer="讲解内容",
         audio_id="unguessable-audio-id",
@@ -148,12 +162,12 @@ def test_device_turn_returns_transcript_answer_and_audio_url():
         "audio_url": "/api/device/audio/unguessable-audio-id",
         "warning": None,
     }
-    runtime.device.process_wav.assert_awaited_once_with(source)
+    runtime.local_device.process_upload.assert_awaited_once_with(source)
 
 
 def test_device_turn_keeps_text_when_tts_is_degraded():
     runtime = FakeRuntime()
-    runtime.device.process_wav.return_value = DeviceTurnResult(
+    runtime.local_device.process_upload.return_value = DeviceTurnResult(
         transcript="问题",
         answer="文字答案",
         audio_id=None,
@@ -181,7 +195,7 @@ def test_device_turn_rejects_oversized_upload_before_processing():
         )
 
     assert response.status_code == 413
-    runtime.device.process_wav.assert_not_awaited()
+    runtime.local_device.process_upload.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -189,6 +203,7 @@ def test_device_turn_rejects_oversized_upload_before_processing():
     [
         (InvalidDeviceAudio("WAV 参数错误"), 415, "WAV 参数错误"),
         (QuestionInProgress(), 409, "已有设备问题正在处理中"),
+        (NoSpeechDetected(), 422, "未识别到有效语音，请重试"),
         (DeviceTranscriptionUnavailable(), 503, "语音识别暂时不可用，请稍后重试"),
         (GuideServiceUnavailable("xzkb"), 503, "知识库暂时不可用，请稍后重试"),
         (GuideServiceUnavailable("capacity"), 503, "当前使用人数较多，请稍后重试"),
@@ -196,13 +211,87 @@ def test_device_turn_rejects_oversized_upload_before_processing():
 )
 def test_device_turn_maps_domain_errors(error, status, detail):
     runtime = FakeRuntime()
-    runtime.device.process_wav.side_effect = error
+    runtime.local_device.process_upload.side_effect = error
     with TestClient(create_app(runtime)) as client:
         response = client.post(
             "/api/device/turn",
             headers=authorized_headers(),
             files={"file": ("question.wav", make_wav(), "audio/wav")},
         )
+
+    assert response.status_code == status
+    assert response.json()["detail"] == detail
+
+
+def test_local_recording_start_and_stop_return_device_state_and_turn():
+    runtime = FakeRuntime()
+    runtime.local_device.stop_recording.return_value = DeviceTurnResult(
+        transcript="介绍展项甲",
+        answer="讲解内容",
+        audio_id="audio-id",
+    )
+    with TestClient(create_app(runtime)) as client:
+        started = client.post(
+            "/api/device/recording/start",
+            headers=authorized_headers(),
+        )
+        stopped = client.post(
+            "/api/device/recording/stop",
+            headers=authorized_headers(),
+        )
+
+    assert started.status_code == 200
+    assert started.json()["phase"] == "recording"
+    assert stopped.status_code == 200
+    assert stopped.json() == {
+        "transcript": "介绍展项甲",
+        "answer": "讲解内容",
+        "audio_url": "/api/device/audio/audio-id",
+        "warning": None,
+    }
+    runtime.local_device.start_recording.assert_awaited_once_with()
+    runtime.local_device.stop_recording.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize(
+    ("path", "error", "status", "detail"),
+    [
+        (
+            "/api/device/recording/start",
+            LocalAudioError("无法启动录音设备，请检查默认输入"),
+            503,
+            "无法启动录音设备，请检查默认输入",
+        ),
+        (
+            "/api/device/recording/stop",
+            QuestionInProgress(),
+            409,
+            "设备正在处理上一轮录音",
+        ),
+        (
+            "/api/device/recording/stop",
+            InvalidDeviceAudio("录音时间过短，请重新录音"),
+            415,
+            "录音时间过短，请重新录音",
+        ),
+        (
+            "/api/device/recording/stop",
+            NoSpeechDetected(),
+            422,
+            "未识别到有效语音，请重试",
+        ),
+    ],
+)
+def test_local_recording_maps_domain_errors(path, error, status, detail):
+    runtime = FakeRuntime()
+    method = (
+        runtime.local_device.start_recording
+        if path.endswith("/start")
+        else runtime.local_device.stop_recording
+    )
+    method.side_effect = error
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(path, headers=authorized_headers())
 
     assert response.status_code == status
     assert response.json()["detail"] == detail
@@ -250,12 +339,12 @@ def test_device_playback_finished_and_reset_return_no_content():
     assert playback.status_code == 204
     assert reset.status_code == 204
     runtime.device.finish_playback.assert_awaited_once()
-    runtime.device.reset.assert_awaited_once()
+    runtime.local_device.reset.assert_awaited_once()
 
 
 def test_device_reset_rejects_busy_session():
     runtime = FakeRuntime()
-    runtime.device.reset.side_effect = QuestionInProgress()
+    runtime.local_device.reset.side_effect = QuestionInProgress()
     with TestClient(create_app(runtime)) as client:
         response = client.post("/api/device/reset", headers=authorized_headers())
 

@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +25,8 @@ class Settings(BaseSettings):
     tts_model: str = Field(min_length=1)
     device_api_key: SecretStr = Field(min_length=8)
     device_max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    local_recording_max_seconds: float = Field(default=60.0, gt=0)
+    local_recording_min_seconds: float = Field(default=0.5, gt=0)
     tts_voice: str = "alloy"
     tts_speed: float = Field(default=1.0, ge=0.25, le=4.0)
     request_timeout_seconds: float = Field(default=30.0, gt=0)
@@ -59,3 +62,9 @@ class Settings(BaseSettings):
         if not normalized:
             raise ValueError("XZKB 空回复不能为空")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_local_recording_limits(self) -> Self:
+        if self.local_recording_min_seconds >= self.local_recording_max_seconds:
+            raise ValueError("最短录音时长必须小于最长录音时长")
+        return self

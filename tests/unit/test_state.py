@@ -100,3 +100,18 @@ async def test_error_can_start_a_new_recording():
     await store.transition(GuidePhase.RECORDING)
 
     assert store.snapshot.phase is GuidePhase.RECORDING
+
+
+@pytest.mark.asyncio
+async def test_start_recording_clears_previous_result_atomically():
+    store = GuideStateStore()
+    await store.start_text_question("旧问题")
+    await store.set_answer("旧答案")
+    await store.transition(GuidePhase.ERROR)
+
+    snapshot = await store.start_recording()
+
+    assert snapshot.phase is GuidePhase.RECORDING
+    assert snapshot.transcript == ""
+    assert snapshot.answer == ""
+    assert snapshot.message == "正在录音，再次点击后提交"

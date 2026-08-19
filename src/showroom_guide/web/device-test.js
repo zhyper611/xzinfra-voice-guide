@@ -1,6 +1,11 @@
 const deviceForm = document.querySelector("#device-form");
 const deviceKey = document.querySelector("#device-key");
 const toggleKey = document.querySelector("#toggle-key");
+const modeButtons = [...document.querySelectorAll("[data-mode]")];
+const microphoneInput = document.querySelector("#microphone-input");
+const wavInput = document.querySelector("#wav-input");
+const localRecord = document.querySelector("#local-record");
+const localRecordLabel = document.querySelector("#local-record-label");
 const wavFile = document.querySelector("#wav-file");
 const dropZone = document.querySelector("#drop-zone");
 const fileName = document.querySelector("#file-name");
@@ -38,11 +43,16 @@ const phaseLabels = {
   degraded: "服务降级",
   error: "出现错误",
 };
+const NO_SPEECH_MESSAGE = "未识别到有效语音，请重试";
 
 let audioObjectUrl = null;
 let pollTimer = null;
 let stateRequestPending = false;
 let metricsRequestPending = false;
+let operationPending = false;
+let currentPhase = "idle";
+let inputMode = "microphone";
+let localPlaybackActive = false;
 
 const outcomeLabels = {
   success: "成功",
@@ -93,7 +103,7 @@ async function responseError(response) {
   } catch {
     detail = "";
   }
-  return new Error(messages[response.status] || detail || `请求失败（${response.status}）`);
+  return new Error(detail || messages[response.status] || `请求失败（${response.status}）`);
 }
 
 async function request(path, options = {}) {
@@ -116,12 +126,27 @@ function clearError() {
 }
 
 function renderState(snapshot) {
-  const currentPhase = snapshot.phase || "idle";
+  currentPhase = snapshot.phase || "idle";
   phasePill.dataset.phase = currentPhase;
   phase.textContent = phaseLabels[currentPhase] || "处理中";
+  if (currentPhase === "error" && snapshot.message === NO_SPEECH_MESSAGE) {
+    phase.textContent = "未检测到语音";
+  }
   statusMessage.textContent = snapshot.message || "设备状态已更新";
   transcript.textContent = snapshot.transcript || "尚未识别";
   answer.textContent = snapshot.answer || "回答会显示在这里";
+  if (inputMode === "microphone" && currentPhase === "speaking") {
+    localPlaybackActive = true;
+    audioHint.textContent = "正在由树莓派扬声器播放";
+  }
+  if (localPlaybackActive && currentPhase === "idle") {
+    audioHint.textContent = "树莓派扬声器播放完成";
+    localPlaybackActive = false;
+  } else if (localPlaybackActive && currentPhase === "error") {
+    audioHint.textContent = "树莓派扬声器播放失败";
+    localPlaybackActive = false;
+  }
+  updateLocalRecordControl();
 }
 
 function clearAudio() {
@@ -144,9 +169,57 @@ function clearResult() {
 }
 
 function setOperationPending(pending) {
+  operationPending = pending;
   runTest.disabled = pending;
   resetDevice.disabled = pending;
   runTestLabel.textContent = pending ? "正在处理" : "开始测试";
+  updateLocalRecordControl();
+}
+
+function updateLocalRecordControl() {
+  const keyReady = Boolean(deviceKey.value.trim());
+  const processing = ["transcribing", "thinking", "speaking"].includes(currentPhase);
+  for (const button of modeButtons) {
+    button.disabled = operationPending || currentPhase === "recording" || processing;
+  }
+  localRecord.dataset.recording = String(currentPhase === "recording");
+  localRecord.disabled = operationPending || processing || !keyReady;
+  if (operationPending) {
+    localRecordLabel.textContent = "正在处理";
+  } else if (currentPhase === "recording") {
+    localRecordLabel.textContent = "结束并提交";
+  } else {
+    localRecordLabel.textContent = "开始录音";
+  }
+}
+
+function showInputMode(mode) {
+  inputMode = mode;
+  microphoneInput.hidden = mode !== "microphone";
+  wavInput.hidden = mode !== "wav";
+  for (const button of modeButtons) {
+    button.setAttribute("aria-selected", String(button.dataset.mode === mode));
+  }
+}
+
+async function renderTurnResult(payload, { localPlayback = false } = {}) {
+  transcript.textContent = payload.transcript || "未识别到有效内容";
+  answer.textContent = payload.answer || "知识库未返回回答";
+  if (payload.warning) deviceError.textContent = payload.warning;
+  if (localPlayback) {
+    clearAudio();
+    if (payload.audio_url) {
+      localPlaybackActive = true;
+      audioHint.textContent = "正在由树莓派扬声器播放";
+    } else {
+      localPlaybackActive = false;
+      audioHint.textContent = "本次仅返回文字内容";
+    }
+  } else if (payload.audio_url) {
+    await loadProtectedAudio(payload);
+  } else {
+    audioHint.textContent = "本次仅返回文字内容";
+  }
 }
 
 async function refreshState({ showFailure = false } = {}) {
@@ -355,11 +428,17 @@ toggleKey.addEventListener("click", () => {
   deviceKey.focus();
 });
 
+for (const button of modeButtons) {
+  button.addEventListener("click", () => showInputMode(button.dataset.mode));
+}
+
 deviceKey.addEventListener("change", () => {
   startPolling();
   refreshMetrics({ showFailure: true });
+  updateLocalRecordControl();
 });
 deviceKey.addEventListener("input", () => {
+  updateLocalRecordControl();
   if (!deviceKey.value.trim()) {
     stopPolling();
     statusMessage.textContent = "填写密钥后开始测试";
@@ -390,11 +469,37 @@ dropZone.addEventListener("drop", (event) => {
   updateSelectedFile(wavFile.files);
 });
 
+localRecord.addEventListener("click", async () => {
+  clearError();
+  try {
+    requireKey();
+    const stopping = currentPhase === "recording";
+    setOperationPending(true);
+    if (stopping) {
+      statusMessage.textContent = "正在结束录音并执行完整语音链路";
+      const response = await request("/api/device/recording/stop", { method: "POST" });
+      const payload = await response.json();
+      await renderTurnResult(payload, { localPlayback: true });
+      await refreshMetrics();
+    } else {
+      clearResult();
+      const response = await request("/api/device/recording/start", { method: "POST" });
+      renderState(await response.json());
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    setOperationPending(false);
+    startPolling();
+  }
+});
+
 deviceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearError();
   try {
     requireKey();
+    if (inputMode !== "wav") throw new Error("请先切换到 WAV 文件模式");
     const selected = wavFile.files[0];
     if (!selected) throw new Error("请选择用于测试的 WAV 文件");
     if (!selected.name.toLowerCase().endsWith(".wav")) throw new Error("请选择 WAV 文件");
@@ -408,15 +513,7 @@ deviceForm.addEventListener("submit", async (event) => {
     body.append("file", selected, selected.name);
     const response = await request("/api/device/turn", { method: "POST", body });
     const payload = await response.json();
-
-    transcript.textContent = payload.transcript || "未识别到有效内容";
-    answer.textContent = payload.answer || "知识库未返回回答";
-    if (payload.warning) deviceError.textContent = payload.warning;
-    if (payload.audio_url) {
-      await loadProtectedAudio(payload);
-    } else {
-      audioHint.textContent = "本次仅返回文字内容";
-    }
+    await renderTurnResult(payload);
   } catch (error) {
     showError(error);
     audioHint.textContent = "语音尚未生成";
@@ -434,9 +531,12 @@ resetDevice.addEventListener("click", async () => {
     setOperationPending(true);
     await request("/api/device/reset", { method: "POST" });
     clearResult();
+    localPlaybackActive = false;
+    currentPhase = "idle";
     phasePill.dataset.phase = "idle";
     phase.textContent = "待机";
     statusMessage.textContent = "设备已重置，可以开始新一轮测试";
+    updateLocalRecordControl();
   } catch (error) {
     showError(error);
   } finally {
@@ -470,4 +570,6 @@ window.addEventListener("beforeunload", () => {
 });
 
 renderMetrics(null);
+showInputMode("microphone");
+updateLocalRecordControl();
 if (deviceKey.value.trim()) refreshMetrics({ showFailure: true });

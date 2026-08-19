@@ -8,6 +8,8 @@
 - 基于 HttpOnly Cookie 的多人会话隔离
 - 每个会话独立保存短期上下文、状态和临时音频
 - 设备端 WAV 上传、ASR、XZKB、TTS 和播放完成回执
+- 设备测试页直接控制树莓派本地麦克风录音和扬声器播放
+- 本地录音、上传、处理和播放使用同一套设备互斥流程
 - 设备接口使用独立密钥鉴权
 - XZKB 与 TTS 并发门控和排队超时
 - TTS 不可用时保留文字回答
@@ -30,7 +32,7 @@
 - 可访问兼容接口的 XZKB、ASR 和 TTS 服务
 - 设备语音输入必须是单声道、16-bit、16 kHz PCM WAV
 
-当前代码已完成 HTTP 语音闭环。真实麦克风、扬声器和按键需要在树莓派上完成硬件接入后，再由本地控制程序调用设备接口。
+当前代码已完成网页文字问答、WAV 上传和树莓派本地麦克风语音闭环。GPIO 物理按键将在本地语音流程验收稳定后接入。
 
 ## 安装
 
@@ -71,6 +73,10 @@ chmod 600 .env
 | `GUIDE_TTS_API_KEY` | TTS API 密钥 |
 | `GUIDE_TTS_MODEL` | TTS 模型名称 |
 | `GUIDE_DEVICE_API_KEY` | 设备专用接口密钥，建议使用高熵随机值 |
+| `GUIDE_CAPTURE_DEVICE` | PipeWire 输入目标；`default` 使用系统默认麦克风 |
+| `GUIDE_PLAYBACK_DEVICE` | PipeWire 输出目标；`default` 使用系统默认扬声器 |
+| `GUIDE_LOCAL_RECORDING_MAX_SECONDS` | 本地单次录音最长时间，默认 60 秒 |
+| `GUIDE_LOCAL_RECORDING_MIN_SECONDS` | 可提交的最短录音时间，默认 0.5 秒 |
 
 其他可调项及默认值见 [.env.example](.env.example)。不要把真实 `.env`、API Key 或设备密钥提交到 Git。
 
@@ -115,6 +121,28 @@ curl -X POST http://127.0.0.1:8765/api/device/turn \
 ```
 
 响应包含识别文本、知识库回答和临时 TTS 音频地址。播放结束后调用 `/api/device/playback-finished`，开始新讲解任务前可调用 `/api/device/reset` 清空设备上下文。
+
+### 本地麦克风与扬声器
+
+树莓派需要安装 PipeWire 命令行工具，并能找到以下命令：
+
+```bash
+command -v pw-record
+command -v pw-play
+```
+
+在 `/device-test` 中选择“本机麦克风”，第一次点击开始录音，第二次点击结束并提交。后端会依次执行 ASR、XZKB 和 TTS，再通过树莓派默认扬声器自动播放回答；页面不负责采集或播放本地语音。
+
+本地录音接口：
+
+```text
+POST /api/device/recording/start
+POST /api/device/recording/stop
+```
+
+两个接口都需要 `X-Device-Key`。录音最长 60 秒，到达上限后自动结束并处理；过短或没有可识别语言的录音不会查询知识库。
+
+更换专用麦克风和扬声器时，将它们设置为 PipeWire 默认输入和默认输出即可，不需要修改项目代码。也可以通过 `GUIDE_CAPTURE_DEVICE`、`GUIDE_PLAYBACK_DEVICE` 指定稳定的 PipeWire 节点名称。
 
 ### 查看链路耗时
 
