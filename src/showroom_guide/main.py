@@ -36,6 +36,7 @@ from showroom_guide.device import (
     DeviceVoiceSession,
     InvalidDeviceAudio,
 )
+from showroom_guide.faq_cache import FaqCache, load_cache
 from showroom_guide.models import GuideSnapshot
 from showroom_guide.sessions import (
     GuideSession,
@@ -83,6 +84,7 @@ class Runtime:
     xzkb: XzkbClient
     speech: SpeechClient
     cleanup_seconds: float
+    faq_cache: FaqCache | None = None
 
     async def aclose(self) -> None:
         await self.sessions.clear()
@@ -93,6 +95,11 @@ class Runtime:
 
 def create_runtime(settings: Settings | None = None) -> Runtime:
     configured = settings or Settings()
+    faq_cache = (
+        load_cache(configured.faq_cache_file)
+        if configured.faq_cache_enabled
+        else None
+    )
     xzkb = XzkbClient(
         configured.xzkb_base_url,
         configured.xzkb_api_key.get_secret_value(),
@@ -126,6 +133,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             speech,
             xzkb_gate=xzkb_gate,
             tts_gate=tts_gate,
+            faq_cache=faq_cache,
         )
 
     sessions = SessionManager(
@@ -152,6 +160,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         device_max_upload_bytes=configured.device_max_upload_bytes,
         xzkb=xzkb,
         speech=speech,
+        faq_cache=faq_cache,
         cleanup_seconds=configured.session_cleanup_seconds,
     )
 

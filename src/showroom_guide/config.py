@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     xzkb_base_url: str = Field(min_length=1)
     xzkb_api_key: SecretStr = Field(min_length=8)
     xzkb_empty_search_response: str = Field(min_length=1)
+    faq_cache_enabled: bool = True
+    faq_cache_file: Path = Path("config/faq_cache.yaml")
     asr_base_url: str = Field(min_length=1)
     asr_api_key: SecretStr = Field(min_length=8)
     asr_model: str = Field(min_length=1)

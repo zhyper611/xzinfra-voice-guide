@@ -7,6 +7,7 @@ import httpx
 
 from showroom_guide.clients.xzkb import XzkbStreamMilestone
 from showroom_guide.concurrency import AsyncGate, QueueWaitTimeout
+from showroom_guide.faq_cache import FaqCache
 from showroom_guide.latency import TurnTiming
 from showroom_guide.models import GuidePhase
 from showroom_guide.state import GuideStateStore
@@ -54,12 +55,14 @@ class GuideController:
         speech_client,
         xzkb_gate: AsyncGate | None = None,
         tts_gate: AsyncGate | None = None,
+        faq_cache: FaqCache | None = None,
     ) -> None:
         self._state: GuideStateStore = state
         self._xzkb = xzkb
         self._speech_client = speech_client
         self._xzkb_gate = xzkb_gate or UnlimitedGate()
         self._tts_gate = tts_gate or UnlimitedGate()
+        self._faq_cache = faq_cache
         self._messages: list[dict[str, str]] = []
         self._question_lock = asyncio.Lock()
 
@@ -102,6 +105,15 @@ class GuideController:
         timing: TurnTiming | None = None,
     ) -> TextQuestionResult:
         await self._state.start_text_question(question)
+        if self._faq_cache is not None:
+            cached_entry = self._faq_cache.match(question)
+            if cached_entry is not None:
+                await self._state.set_message("正在准备讲解内容")
+                answer = cached_entry.answer
+                await self._state.set_answer(answer)
+                self._remember_exchange(question, answer)
+                return await self._synthesize_answer(answer, timing)
+
         if self._needs_exhibit_clarification(question):
             answer = "您指的是哪个产品或展项？"
             await self._state.append_answer(answer)
@@ -174,6 +186,10 @@ class GuideController:
             await self._degrade("知识库没有返回有效答案，请换一种问法")
             raise GuideServiceUnavailable("xzkb")
 
+        self._remember_exchange(question, answer)
+        return await self._synthesize_answer(answer, timing)
+
+    def _remember_exchange(self, question: str, answer: str) -> None:
         self._messages.extend(
             [
                 {"role": "user", "content": question},
@@ -181,7 +197,6 @@ class GuideController:
             ]
         )
         self._messages = self._messages[-20:]
-        return await self._synthesize_answer(answer, timing)
 
     def _needs_exhibit_clarification(self, question: str) -> bool:
         return not self._messages and any(

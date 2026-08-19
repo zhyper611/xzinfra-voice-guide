@@ -35,6 +35,37 @@ def normalize_question(text: str) -> str:
     )
 
 
+def _validate_rule_terms(
+    terms: tuple[str, ...],
+    field_name: str,
+) -> tuple[str, ...]:
+    seen: dict[str, str] = {}
+    for term in terms:
+        normalized = normalize_question(term)
+        if not normalized:
+            raise ValueError(f"{field_name} 词条 {term!r} 标准化后为空")
+        previous = seen.get(normalized)
+        if previous is not None:
+            raise ValueError(
+                f"{field_name} 标准化后重复: {previous!r} 与 {term!r} -> {normalized!r}"
+            )
+        seen[normalized] = term
+    return terms
+
+
+class CacheMatchRules(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    subjects: tuple[str, ...] = Field(min_length=1)
+    intents: tuple[str, ...] = Field(min_length=1)
+    excludes: tuple[str, ...] = ()
+
+    @field_validator("subjects", "intents", "excludes")
+    @classmethod
+    def validate_terms(cls, terms: tuple[str, ...], info) -> tuple[str, ...]:
+        return _validate_rule_terms(terms, info.field_name)
+
+
 class CacheEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -44,6 +75,7 @@ class CacheEntry(BaseModel):
     priority: CachePriority
     version: int
     aliases: tuple[str, ...] = Field(min_length=1)
+    match_rules: CacheMatchRules | None = None
     answer: str
     audio_file: str
 
@@ -78,26 +110,55 @@ class CacheDocument(BaseModel):
 
     schema_version: Literal[1]
     source_document: str = ""
+    rule_excludes: tuple[str, ...] = ()
     entries: tuple[CacheEntry, ...] = Field(min_length=1)
+
+    @field_validator("rule_excludes")
+    @classmethod
+    def validate_rule_excludes(cls, terms: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_rule_terms(terms, "rule_excludes")
+
+
+@dataclass(frozen=True)
+class CompiledMatchRule:
+    entry: CacheEntry
+    subjects: tuple[str, ...]
+    intents: tuple[str, ...]
+    excludes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class FaqCache:
-    """An immutable cache configuration and its exact-match index."""
+    """An immutable cache configuration with alias and rule indexes."""
 
     entries: tuple[CacheEntry, ...]
     _alias_index: Mapping[str, CacheEntry] = field(repr=False)
+    _rule_excludes: tuple[str, ...] = field(default=(), repr=False)
+    _rule_index: tuple[CompiledMatchRule, ...] = field(default=(), repr=False)
 
     @property
     def alias_index(self) -> Mapping[str, CacheEntry]:
         return self._alias_index
 
     def match(self, question: str) -> CacheEntry | None:
-        """Match a question using only its normalized complete alias."""
+        """Match by exact alias first, then by an unambiguous subject/intent rule."""
         normalized = normalize_question(question)
         if not normalized:
             return None
-        return self._alias_index.get(normalized)
+        exact_match = self._alias_index.get(normalized)
+        if exact_match is not None:
+            return exact_match
+        if any(exclude in normalized for exclude in self._rule_excludes):
+            return None
+
+        matches = [
+            rule.entry
+            for rule in self._rule_index
+            if any(subject in normalized for subject in rule.subjects)
+            and any(intent in normalized for intent in rule.intents)
+            and not any(exclude in normalized for exclude in rule.excludes)
+        ]
+        return matches[0] if len(matches) == 1 else None
 
 
 def load_cache(path: str | Path) -> FaqCache:
@@ -129,6 +190,7 @@ def load_cache(path: str | Path) -> FaqCache:
     alias_index: dict[str, CacheEntry] = {}
     ids: dict[str, CacheEntry] = {}
     alias_owners: dict[str, tuple[str, str]] = {}
+    rule_index: list[CompiledMatchRule] = []
     for entry in document.entries:
         previous_entry = ids.get(entry.id)
         if previous_entry is not None:
@@ -152,4 +214,28 @@ def load_cache(path: str | Path) -> FaqCache:
             if entry.enabled:
                 alias_index[normalized_alias] = entry
 
-    return FaqCache(document.entries, MappingProxyType(alias_index))
+        if entry.enabled and entry.match_rules is not None:
+            rule_index.append(
+                CompiledMatchRule(
+                    entry=entry,
+                    subjects=tuple(
+                        normalize_question(subject)
+                        for subject in entry.match_rules.subjects
+                    ),
+                    intents=tuple(
+                        normalize_question(intent)
+                        for intent in entry.match_rules.intents
+                    ),
+                    excludes=tuple(
+                        normalize_question(exclude)
+                        for exclude in entry.match_rules.excludes
+                    ),
+                )
+            )
+
+    return FaqCache(
+        document.entries,
+        MappingProxyType(alias_index),
+        tuple(normalize_question(term) for term in document.rule_excludes),
+        tuple(rule_index),
+    )
