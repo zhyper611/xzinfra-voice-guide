@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     faq_cache_enabled: bool = True
     faq_cache_file: Path = Path("config/faq_cache.yaml")
     faq_prepared_audio_enabled: bool = True
+    faq_admin_enabled: bool = False
+    faq_admin_api_key: SecretStr | None = None
     asr_base_url: str = Field(min_length=1)
     asr_api_key: SecretStr = Field(min_length=8)
     asr_model: str = Field(min_length=1)
@@ -97,4 +99,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "启用知识补充时必须配置 XZKB 写入 Token 和知识库 ID"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_faq_admin_credentials(self) -> Self:
+        if self.faq_admin_enabled:
+            key = self.faq_admin_api_key
+            if key is None or len(key.get_secret_value()) < 16:
+                raise ValueError(
+                    "faq_admin_api_key must contain at least 16 characters "
+                    "when faq_admin_enabled is true"
+                )
         return self

@@ -135,6 +135,9 @@ class FaqCache:
     _alias_index: Mapping[str, CacheEntry] = field(repr=False)
     _rule_excludes: tuple[str, ...] = field(default=(), repr=False)
     _rule_index: tuple[CompiledMatchRule, ...] = field(default=(), repr=False)
+    schema_version: Literal[1] = 1
+    source_document: str = ""
+    rule_excludes: tuple[str, ...] = ()
 
     @property
     def alias_index(self) -> Mapping[str, CacheEntry]:
@@ -234,8 +237,13 @@ def load_cache(path: str | Path) -> FaqCache:
             )
 
     return FaqCache(
-        document.entries,
-        MappingProxyType(alias_index),
-        tuple(normalize_question(term) for term in document.rule_excludes),
-        tuple(rule_index),
+        entries=document.entries,
+        _alias_index=MappingProxyType(alias_index),
+        _rule_excludes=tuple(
+            normalize_question(term) for term in document.rule_excludes
+        ),
+        _rule_index=tuple(rule_index),
+        schema_version=document.schema_version,
+        source_document=document.source_document,
+        rule_excludes=document.rule_excludes,
     )

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f8ff">
+  <title>高频问答缓存 · 新智惠想</title>
+  <link rel="icon" href="/static/xzinfra-logo.svg">
+  <link rel="stylesheet" href="/static/faq-cache.css?v=20260820">
+  <script src="/static/faq-cache.js?v=20260820" defer></script>
+</head>
+<body>
+  <header class="brand-bar">
+    <a href="/" class="brand" aria-label="返回展厅 AI 讲解首页">
+      <img src="/static/xzinfra-logo.svg" alt="新智惠想">
+    </a>
+    <div class="environment"><span aria-hidden="true"></span>FAQ CACHE</div>
+  </header>
+
+  <main class="admin-shell">
+    <header class="page-heading">
+      <div>
+        <p class="eyebrow">VOICE GUIDE OPERATIONS</p>
+        <h1>高频问答缓存</h1>
+      </div>
+      <div class="heading-meta">
+        <span id="document-name">尚未连接</span>
+        <b id="reload-policy">读取当前配置</b>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <section class="access-panel" aria-labelledby="access-title">
+        <div class="section-heading">
+          <span>01</span>
+          <div><p>ADMIN ACCESS</p><h2 id="access-title">连接维护接口</h2></div>
+        </div>
+
+        <form id="access-form">
+          <label for="admin-key">管理密钥</label>
+          <div class="secret-field">
+            <input id="admin-key" type="password" autocomplete="off" spellcheck="false" required>
+            <button id="toggle-key" type="button" aria-label="显示管理密钥" aria-pressed="false">显示</button>
+          </div>
+          <button id="connect-button" class="primary" type="submit"><span>读取缓存</span><b aria-hidden="true">→</b></button>
+        </form>
+
+        <div id="connection-state" class="connection-state" data-state="idle" aria-live="polite">
+          <i aria-hidden="true"></i>
+          <div><strong>等待连接</strong><span>密钥仅保留在当前页面</span></div>
+        </div>
+        <p id="access-error" class="error" role="alert"></p>
+
+        <div id="summary" class="summary" hidden>
+          <div><span>条目</span><strong id="summary-total">0</strong></div>
+          <div><span>已启用</span><strong id="summary-enabled">0</strong></div>
+          <div><span>有效音频</span><strong id="summary-valid">0</strong></div>
+          <div><span>待审批</span><strong id="summary-draft">0</strong></div>
+          <div><span>待处理</span><strong id="summary-attention">0</strong></div>
+        </div>
+
+        <div id="tts-profile" class="profile" hidden>
+          <p>TTS PROFILE</p>
+          <dl>
+            <div><dt>模型</dt><dd id="profile-model">--</dd></div>
+            <div><dt>音色</dt><dd id="profile-voice">--</dd></div>
+            <div><dt>语速</dt><dd id="profile-speed">--</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="inventory-panel" aria-labelledby="inventory-title">
+        <div class="panel-topline">
+          <div class="section-heading">
+            <span>02</span>
+            <div><p>CACHE INVENTORY</p><h2 id="inventory-title">缓存条目</h2></div>
+          </div>
+          <div class="panel-actions">
+            <button id="new-entry-button" class="icon-button" type="button" aria-label="新建缓存条目" title="新建条目" disabled>＋</button>
+            <button id="refresh-button" class="icon-button" type="button" aria-label="刷新缓存条目" title="刷新" disabled>↻</button>
+          </div>
+        </div>
+
+        <div class="filters">
+          <label class="search-field" for="entry-search">
+            <span aria-hidden="true">⌕</span>
+            <input id="entry-search" type="search" placeholder="搜索标题、ID、别名" autocomplete="off">
+          </label>
+          <div class="filter-row">
+            <select id="priority-filter" aria-label="按优先级筛选">
+              <option value="all">全部优先级</option>
+              <option value="high">高优先级</option>
+              <option value="medium">中优先级</option>
+            </select>
+            <select id="enabled-filter" aria-label="按启用状态筛选">
+              <option value="all">全部状态</option>
+              <option value="enabled">已启用</option>
+              <option value="disabled">已停用</option>
+            </select>
+            <select id="audio-filter" aria-label="按音频状态筛选">
+              <option value="all">全部音频</option>
+              <option value="valid">有效</option>
+              <option value="missing">缺失</option>
+              <option value="stale">已过期</option>
+              <option value="invalid">无效</option>
+              <option value="disabled">已停用</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="list-meta"><span id="result-count">0 个条目</span><span id="list-status">等待读取</span></div>
+        <div id="entry-list" class="entry-list" role="listbox" aria-label="高频问答缓存条目"></div>
+        <div id="list-empty" class="empty-state">
+          <strong>暂无缓存数据</strong>
+          <span>连接维护接口后显示条目</span>
+        </div>
+      </section>
+
+      <section class="detail-panel" aria-labelledby="detail-title">
+        <div class="section-heading">
+          <span>03</span>
+          <div><p>ENTRY DETAIL</p><h2 id="detail-title">条目详情</h2></div>
+        </div>
+
+        <div id="detail-empty" class="detail-empty">
+          <span>03</span>
+          <strong>选择一个缓存条目</strong>
+          <p>文本、匹配规则与音频状态将在此显示</p>
+        </div>
+
+        <article id="entry-detail" hidden>
+          <header class="detail-header">
+            <div>
+              <p id="detail-id">--</p>
+              <h3 id="detail-name">--</h3>
+            </div>
+            <div class="detail-actions">
+              <span id="detail-enabled" class="state-badge">--</span>
+              <button id="edit-entry-button" class="icon-button compact" type="button" aria-label="编辑当前条目" title="编辑" disabled>✎</button>
+              <button id="delete-entry-button" class="icon-button compact danger-icon" type="button" aria-label="删除当前条目" title="删除" disabled>×</button>
+            </div>
+          </header>
+
+          <div class="detail-facts">
+            <div><span>优先级</span><strong id="detail-priority">--</strong></div>
+            <div><span>版本</span><strong id="detail-version">--</strong></div>
+            <div><span>音频</span><strong id="detail-audio-status">--</strong></div>
+          </div>
+
+          <section class="detail-section">
+            <h4>固定回答</h4>
+            <p id="detail-answer" class="answer-text"></p>
+          </section>
+
+          <section class="detail-section">
+            <h4>精确别名 <span id="alias-count">0</span></h4>
+            <div id="detail-aliases" class="tag-list"></div>
+          </section>
+
+          <section class="detail-section">
+            <h4>规则匹配</h4>
+            <dl id="detail-rules" class="rule-list"></dl>
+          </section>
+
+          <section class="detail-section audio-detail">
+            <h4>预生成音频</h4>
+            <dl>
+              <div><dt>文件</dt><dd id="audio-file">--</dd></div>
+              <div><dt>时长</dt><dd id="audio-duration">--</dd></div>
+              <div><dt>采样</dt><dd id="audio-format">--</dd></div>
+              <div><dt>大小</dt><dd id="audio-size">--</dd></div>
+            </dl>
+          </section>
+
+          <section class="detail-section review-station" aria-labelledby="review-title">
+            <div class="review-heading">
+              <div><p>AUDIO REVIEW</p><h4 id="review-title">语音生成与审批</h4></div>
+              <span id="draft-status" data-status="none">无草稿</span>
+            </div>
+            <div class="audio-actions">
+              <button id="play-active" class="audio-action secondary" type="button" disabled><span aria-hidden="true">▶</span>试听正式音频</button>
+              <button id="generate-audio" class="audio-action primary-action" type="button" disabled><span aria-hidden="true">＋</span>生成语音草稿</button>
+              <button id="play-draft" class="audio-action secondary" type="button" disabled><span aria-hidden="true">▶</span>试听待审批草稿</button>
+              <button id="approve-audio" class="audio-action approve-action" type="button" disabled><span aria-hidden="true">✓</span>审批通过并安装</button>
+            </div>
+            <audio id="review-audio" controls preload="none" hidden></audio>
+            <p id="review-message" class="review-message" aria-live="polite">生成的语音会先进入待审批区，不会覆盖正式音频。</p>
+          </section>
+        </article>
+      </section>
+    </div>
+
+    <footer class="privacy-note"><span aria-hidden="true">●</span>管理密钥不会写入浏览器存储 · 配置与音频变更后需重启服务生效</footer>
+  </main>
+
+  <dialog id="entry-editor" class="entry-editor" aria-labelledby="editor-title">
+    <form id="entry-editor-form" autocomplete="off">
+      <header class="editor-header">
+        <div><p>FAQ ENTRY</p><h2 id="editor-title">新建缓存条目</h2></div>
+        <button id="close-editor" class="icon-button compact" type="button" aria-label="关闭编辑器">×</button>
+      </header>
+
+      <div class="editor-scroll">
+        <div class="editor-grid">
+          <label>ID
+            <input id="editor-id" name="id" required pattern="[a-z0-9][a-z0-9_-]*" spellcheck="false">
+          </label>
+          <label>标题
+            <input id="editor-title-input" name="title" required>
+          </label>
+          <label>优先级
+            <select id="editor-priority" name="priority">
+              <option value="high">高优先级</option>
+              <option value="medium">中优先级</option>
+            </select>
+          </label>
+          <label class="toggle-field">
+            <input id="editor-enabled" name="enabled" type="checkbox">
+            <span>启用缓存匹配</span>
+          </label>
+        </div>
+
+        <label>精确别名 <span>每行一个</span>
+          <textarea id="editor-aliases" name="aliases" rows="5" required></textarea>
+        </label>
+
+        <label>固定回答
+          <textarea id="editor-answer" name="answer" rows="7" required></textarea>
+        </label>
+        <p class="editor-notice">修改固定回答会自动递增版本，现有正式音频和待审批草稿将变为过期。</p>
+
+        <label class="toggle-field rules-toggle">
+          <input id="editor-rules-enabled" type="checkbox">
+          <span>启用主题词 + 意图词规则匹配</span>
+        </label>
+        <div id="editor-rules" class="rules-editor" data-enabled="false">
+          <label>主题词 <span>每行一个</span>
+            <textarea id="editor-subjects" rows="4"></textarea>
+          </label>
+          <label>意图词 <span>每行一个</span>
+            <textarea id="editor-intents" rows="4"></textarea>
+          </label>
+          <label>条目排除词 <span>每行一个，可留空</span>
+            <textarea id="editor-excludes" rows="4"></textarea>
+          </label>
+        </div>
+      </div>
+
+      <p id="editor-error" class="editor-error" role="alert"></p>
+      <footer class="editor-footer">
+        <button id="cancel-editor" class="editor-secondary" type="button">取消</button>
+        <button id="save-entry" class="editor-primary" type="submit">保存条目</button>
+      </footer>
+    </form>
+  </dialog>
+</body>
+</html>
