@@ -145,7 +145,7 @@ class DeviceVoiceSession:
                 transcript = (await self._speech.transcribe(io.BytesIO(audio))).strip()
                 if not transcript:
                     raise NoSpeechDetected(NO_SPEECH_MESSAGE)
-            except httpx.HTTPError as error:
+            except (httpx.HTTPError, ValueError) as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
                 await self._state.set_message("语音识别暂时不可用，请稍后重试")

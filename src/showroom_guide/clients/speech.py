@@ -4,6 +4,8 @@ import httpx
 
 
 class SpeechClient:
+    _MAX_ATTEMPTS = 2
+
     def __init__(
         self,
         asr_base_url: str,
@@ -36,17 +38,26 @@ class SpeechClient:
         await self._client.aclose()
 
     async def transcribe(self, audio: BinaryIO) -> str:
-        response = await self._client.post(
+        audio_bytes = audio.read()
+        response = await self._post_with_retry(
             self._asr_url,
             headers=self._asr_headers,
-            files={"file": ("question.wav", audio, "audio/wav")},
+            files={"file": ("question.wav", audio_bytes, "audio/wav")},
             data={"model": self._asr_model},
         )
-        response.raise_for_status()
-        return response.json().get("text", "").strip()
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ValueError("ASR endpoint returned invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise ValueError("ASR endpoint returned an invalid response")
+        text = payload.get("text", "")
+        if not isinstance(text, str):
+            raise ValueError("ASR endpoint returned invalid text")
+        return text.strip()
 
     async def synthesize(self, text: str) -> bytes:
-        response = await self._client.post(
+        response = await self._post_with_retry(
             self._tts_url,
             headers=self._tts_headers,
             json={
@@ -57,8 +68,23 @@ class SpeechClient:
                 "response_format": "wav",
             },
         )
-        response.raise_for_status()
         audio = response.content
         if len(audio) < 12 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
             raise ValueError("TTS endpoint did not return valid WAV audio")
         return audio
+
+    async def _post_with_retry(self, url: str, **kwargs: object) -> httpx.Response:
+        for attempt in range(self._MAX_ATTEMPTS):
+            try:
+                response = await self._client.post(url, **kwargs)
+                response.raise_for_status()
+                return response
+            except httpx.TransportError:
+                if attempt + 1 >= self._MAX_ATTEMPTS:
+                    raise
+            except httpx.HTTPStatusError as error:
+                status = error.response.status_code
+                transient = status in {408, 429} or status >= 500
+                if not transient or attempt + 1 >= self._MAX_ATTEMPTS:
+                    raise
+        raise RuntimeError("speech request retry exhausted")

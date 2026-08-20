@@ -80,6 +80,8 @@ class XzkbClient:
                 if payload == "[DONE]":
                     return
                 data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise XzkbResponseError("XZKB returned an invalid event")
                 error = data.get("error")
                 if isinstance(error, dict):
                     message = str(error.get("message") or "").strip()
@@ -88,7 +90,13 @@ class XzkbClient:
                         return
                     raise XzkbResponseError(message or "XZKB returned an error response")
                 choices = data.get("choices") or [{}]
+                if not isinstance(choices, list) or not isinstance(choices[0], dict):
+                    raise XzkbResponseError("XZKB returned invalid choices")
                 delta = choices[0].get("delta") or {}
+                if not isinstance(delta, dict):
+                    raise XzkbResponseError("XZKB returned an invalid delta")
                 text = delta.get("content", "")
+                if not isinstance(text, str):
+                    raise XzkbResponseError("XZKB returned invalid content")
                 if text:
                     yield ChatStreamEvent(text=text)

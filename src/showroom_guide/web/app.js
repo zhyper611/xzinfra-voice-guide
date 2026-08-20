@@ -26,6 +26,25 @@ const phaseLabels = {
 };
 
 let retryDelay = 1000;
+const REQUEST_TIMEOUT_MS = 180000;
+
+async function request(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT_MS,
+  );
+  try {
+    return await fetch(path, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("请求超时，请检查网络后重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
 
 function renderState(snapshot) {
   interactionCard.dataset.phase = snapshot.phase;
@@ -63,7 +82,7 @@ function connectStateStream() {
 
 async function notifyPlaybackFinished() {
   try {
-    const response = await fetch("/api/playback-finished", { method: "POST" });
+    const response = await request("/api/playback-finished", { method: "POST" });
     if (response.status === 401) window.location.reload();
   } catch {
     formError.textContent = "播放已结束，但状态同步失败。";
@@ -98,7 +117,7 @@ newConversation.addEventListener("click", async () => {
   if (!window.confirm("确定开始新对话吗？当前对话内容将被清空。")) return;
   newConversation.disabled = true;
   try {
-    const response = await fetch("/api/session/reset", { method: "POST" });
+    const response = await request("/api/session/reset", { method: "POST" });
     if (response.status === 401) {
       window.location.reload();
       return;
@@ -134,7 +153,7 @@ form.addEventListener("submit", async (event) => {
   audioHint.textContent = "正在准备语音讲解。";
 
   try {
-    const response = await fetch("/api/questions", {
+    const response = await request("/api/questions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question: value }),
@@ -170,4 +189,8 @@ question.addEventListener("keydown", (event) => {
 });
 
 audio.addEventListener("ended", notifyPlaybackFinished);
+audio.addEventListener("error", async () => {
+  audioHint.textContent = "语音加载失败，本次讲解已结束。";
+  await notifyPlaybackFinished();
+});
 connectStateStream();

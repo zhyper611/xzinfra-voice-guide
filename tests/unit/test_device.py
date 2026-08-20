@@ -174,6 +174,19 @@ async def test_asr_failure_enters_error_and_allows_next_turn():
 
 
 @pytest.mark.asyncio
+async def test_malformed_asr_response_enters_recoverable_error_state():
+    speech = TrackingSpeech(["介绍展项甲"])
+    speech.transcribe = AsyncMock(side_effect=ValueError("invalid ASR response"))
+    session, state, _, _ = make_session(speech)
+
+    with pytest.raises(DeviceTranscriptionUnavailable):
+        await session.process_wav(make_wav())
+
+    assert state.snapshot.phase is GuidePhase.ERROR
+    assert state.snapshot.message == "语音识别暂时不可用，请稍后重试"
+
+
+@pytest.mark.asyncio
 async def test_empty_transcript_has_actionable_message():
     speech = TrackingSpeech(["   "])
     session, state, xzkb, speech = make_session(speech)

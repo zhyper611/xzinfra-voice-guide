@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Self
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,6 +36,7 @@ class Settings(BaseSettings):
     tts_speed: float = Field(default=1.0, ge=0.25, le=4.0)
     request_timeout_seconds: float = Field(default=30.0, gt=0)
     first_audio_timeout_seconds: float = Field(default=5.0, gt=0)
+    playback_timeout_seconds: float = Field(default=300.0, gt=0)
     session_idle_seconds: float = Field(default=1800.0, gt=0)
     session_cleanup_seconds: float = Field(default=60.0, gt=0)
     max_active_sessions: int = Field(default=100, gt=0)
@@ -46,6 +48,20 @@ class Settings(BaseSettings):
     capture_device: str = "default"
     playback_device: str = "default"
     sample_rate: int = Field(default=16000, gt=0)
+    gpio_button_enabled: bool = False
+    button_hold_seconds: float = Field(default=1.5, gt=0)
+    knowledge_capture_enabled: bool = False
+    xzkb_write_token: SecretStr | None = None
+    xzkb_knowledge_base_id: UUID | None = None
+    xzkb_knowledge_folder_id: UUID | None = None
+    knowledge_outbox_path: Path = (
+        Path.home()
+        / ".local"
+        / "share"
+        / "showroom-guide"
+        / "knowledge-outbox.sqlite3"
+    )
+    knowledge_sync_interval_seconds: float = Field(default=30.0, gt=0)
     ptt_pin: int = 17
     stop_pin: int = 27
     volume_up_pin: int = 22
@@ -67,10 +83,22 @@ class Settings(BaseSettings):
             raise ValueError("XZKB 空回复不能为空")
         return normalized
 
+    @field_validator("knowledge_outbox_path", mode="before")
+    @classmethod
+    def expand_knowledge_outbox_path(cls, value: str | Path) -> Path:
+        return Path(value).expanduser()
+
     @model_validator(mode="after")
     def validate_local_recording_limits(self) -> Self:
         if self.local_recording_min_seconds >= self.local_recording_max_seconds:
             raise ValueError("最短录音时长必须小于最长录音时长")
+        if self.knowledge_capture_enabled and (
+            self.xzkb_write_token is None
+            or self.xzkb_knowledge_base_id is None
+        ):
+            raise ValueError(
+                "启用知识补充时必须配置 XZKB 写入 Token 和知识库 ID"
+            )
         return self
 
     @model_validator(mode="after")

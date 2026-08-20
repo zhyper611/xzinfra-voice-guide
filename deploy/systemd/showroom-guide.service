@@ -5,10 +5,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-WorkingDirectory=%h/xzinfra-voice-guide
-EnvironmentFile=%h/.config/xzinfra-voice-guide/xzinfra-voice-guide.env
+WorkingDirectory=%h/showroom-guide
+EnvironmentFile=%h/.config/showroom-guide/showroom-guide.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/xzinfra-voice-guide/.venv/bin/python -m uvicorn showroom_guide.main:create_configured_app --factory --app-dir src --host 0.0.0.0 --port 8765
+ExecStart=%h/showroom-guide/.venv/bin/python -m uvicorn showroom_guide.main:create_configured_app --factory --app-dir src --host 0.0.0.0 --port 8765
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT

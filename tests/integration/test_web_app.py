@@ -182,7 +182,7 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'request("/api/device/recording/stop"' in response.text
     assert 'request("/api/device/recording/replay"' in response.text
     assert 'request("/api/device/state"' in response.text
-    assert 'request("/api/device/metrics")' in response.text
+    assert 'request("/api/device/metrics"' in response.text
     assert 'request(payload.audio_url' in response.text
     assert "URL.createObjectURL(audioBlob)" in response.text
     assert 'request("/api/device/playback-finished"' in response.text
@@ -218,6 +218,9 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     )
     assert 'phase.textContent = "未检测到语音"' in response.text
     assert '422: "没有听清您的声音，请靠近麦克风后再试一次。"' in response.text
+    assert "new AbortController()" in response.text
+    assert "REQUEST_TIMEOUT_MS" in response.text
+    assert "请求超时，请检查网络后重试" in response.text
 
 
 def test_index_uses_local_xzinfra_brand_assets():
@@ -263,9 +266,21 @@ def test_frontend_script_keeps_existing_api_contract():
 
     assert response.status_code == 200
     assert 'new WebSocket(`${protocol}//${window.location.host}/ws`)' in response.text
-    assert 'fetch("/api/questions"' in response.text
-    assert 'fetch("/api/playback-finished"' in response.text
+    assert 'request("/api/questions"' in response.text
+    assert 'request("/api/playback-finished"' in response.text
     assert "form.requestSubmit()" in response.text
+    assert "new AbortController()" in response.text
+    assert "REQUEST_TIMEOUT_MS" in response.text
+    assert "请求超时，请检查网络后重试" in response.text
+
+
+def test_health_endpoint_reports_process_liveness_without_session():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 def test_styles_include_brand_tokens_and_responsive_accessibility_rules():
@@ -291,6 +306,18 @@ def test_frontend_script_exposes_status_and_audio_fallback_copy():
     assert 'submitLabel.textContent = "正在处理"' in response.text
     assert "浏览器阻止了自动播放，请点击播放讲解。" in response.text
     assert 'audioHint.textContent = "语音讲解已准备好。"' in response.text
+    assert 'audio.addEventListener("error"' in response.text
+    assert "notifyPlaybackFinished" in response.text
+
+
+def test_device_test_reports_audio_load_failure_to_backend():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/static/device-test.js")
+
+    assert response.status_code == 200
+    assert 'audio.addEventListener("error"' in response.text
+    assert 'request("/api/device/playback-finished"' in response.text
 
 
 def test_frontend_exposes_new_conversation_control():
@@ -300,7 +327,7 @@ def test_frontend_exposes_new_conversation_control():
         script = client.get("/static/app.js")
 
     assert 'id="new-conversation"' in page.text
-    assert 'fetch("/api/session/reset"' in script.text
+    assert 'request("/api/session/reset"' in script.text
     assert "确定开始新对话吗？" in script.text
     assert "已开始新的讲解会话" in script.text
 
