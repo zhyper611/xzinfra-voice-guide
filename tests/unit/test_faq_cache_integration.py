@@ -10,9 +10,11 @@ import yaml
 
 from showroom_guide.config import Settings
 from showroom_guide.controller import GuideController
+from showroom_guide.faq_audio import FaqAudioGenerator, TtsProfile
 from showroom_guide.device import DeviceVoiceSession
 from showroom_guide.faq_cache import CacheConfigError, load_cache
 from showroom_guide.main import create_runtime
+from showroom_guide.prepared_audio import PreparedAudioStore
 from showroom_guide.state import GuidePhase, GuideStateStore
 from showroom_guide.audio_store import AudioStore
 from showroom_guide.clients.xzkb import ChatStreamEvent
@@ -58,7 +60,13 @@ def write_cache(tmp_path: Path, entries: list[dict[str, object]]) -> Path:
     return path
 
 
-def make_settings(*, faq_cache_enabled: bool = True, faq_cache_file=None) -> Settings:
+def make_settings(
+    *,
+    faq_cache_enabled: bool = True,
+    faq_cache_file=None,
+    faq_prepared_audio_enabled: bool = True,
+    tts_model: str = "company-tts",
+) -> Settings:
     return Settings(
         _env_file=None,
         xzkb_base_url="http://xzkb.test",
@@ -69,10 +77,11 @@ def make_settings(*, faq_cache_enabled: bool = True, faq_cache_file=None) -> Set
         asr_model="company-asr",
         tts_base_url="http://tts.test",
         tts_api_key="tts-test-key",
-        tts_model="company-tts",
+        tts_model=tts_model,
         device_api_key="device-test-key",
         faq_cache_enabled=faq_cache_enabled,
         faq_cache_file=faq_cache_file or FORMAL_CACHE,
+        faq_prepared_audio_enabled=faq_prepared_audio_enabled,
     )
 
 
@@ -137,6 +146,7 @@ def make_cached_controller(
     speech=None,
     xzkb_gate=None,
     tts_gate=None,
+    prepared_audio=None,
 ):
     state = GuideStateStore()
     cache = load_cache(cache_path)
@@ -149,8 +159,23 @@ def make_cached_controller(
         xzkb_gate=xzkb_gate,
         tts_gate=tts_gate,
         faq_cache=cache,
+        prepared_audio=prepared_audio,
     )
     return controller, state, xzkb, speech
+
+
+async def build_prepared_audio(cache_path: Path) -> tuple[PreparedAudioStore, bytes]:
+    profile = TtsProfile(model="company-tts", voice="alloy", speed=1.0)
+    audio = make_wav()
+    generator = FaqAudioGenerator(load_cache(cache_path), cache_path, profile)
+    class FakeSynthesizer:
+        async def synthesize(self, _text: str) -> bytes:
+            return audio
+
+    synthesizer = FakeSynthesizer()
+    result = await generator.run(synthesizer, entry_ids=["fixed"])
+    assert result.generated == 1
+    return PreparedAudioStore(load_cache(cache_path), cache_path, profile), audio
 
 
 def test_formal_repository_cache_loads_and_matches_a_representative_question():
@@ -173,6 +198,29 @@ async def test_cache_disabled_does_not_read_the_config_file(tmp_path: Path):
     )
 
     assert runtime.faq_cache is None
+    assert runtime.prepared_audio is None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_prepared_audio_disabled_does_not_construct_or_read_store(
+    monkeypatch,
+    tmp_path: Path,
+):
+    path = write_cache(tmp_path, [cache_entry()])
+
+    def fail_store(*_args, **_kwargs):
+        raise AssertionError("prepared audio must be disabled")
+
+    monkeypatch.setattr("showroom_guide.main.PreparedAudioStore", fail_store)
+    runtime = create_runtime(
+        make_settings(
+            faq_cache_file=path,
+            faq_prepared_audio_enabled=False,
+        )
+    )
+
+    assert runtime.prepared_audio is None
     await runtime.aclose()
 
 
@@ -213,6 +261,71 @@ async def test_cache_hit_uses_fixed_answer_skips_xzkb_and_calls_tts(tmp_path: Pa
     xzkb.stream_chat.assert_not_called()
     assert xzkb_gate.calls == 0
     speech.synthesize.assert_awaited_once_with("这是完整的固定回答")
+
+
+@pytest.mark.asyncio
+async def test_prepared_audio_hit_skips_xzkb_tts_and_tts_gate(tmp_path: Path):
+    path = write_cache(tmp_path, [cache_entry(answer="预生成固定回答")])
+    prepared_audio, expected_audio = await build_prepared_audio(path)
+    xzkb = MagicMock()
+    speech = AsyncMock()
+    xzkb_gate = CountingGate()
+    tts_gate = CountingGate()
+    controller, state, xzkb, speech = make_cached_controller(
+        path,
+        xzkb=xzkb,
+        speech=speech,
+        xzkb_gate=xzkb_gate,
+        tts_gate=tts_gate,
+        prepared_audio=prepared_audio,
+    )
+
+    result = await controller.ask_text("固定问题")
+
+    assert result.answer == "预生成固定回答"
+    assert result.audio == expected_audio
+    assert state.snapshot.phase is GuidePhase.SPEAKING
+    assert state.snapshot.message == "正在播放讲解"
+    assert controller._messages == [
+        {"role": "user", "content": "固定问题"},
+        {"role": "assistant", "content": "预生成固定回答"},
+    ]
+    xzkb.stream_chat.assert_not_called()
+    speech.synthesize.assert_not_called()
+    assert xzkb_gate.calls == 0
+    assert tts_gate.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_faq_hit_without_prepared_audio_falls_back_to_online_tts(tmp_path: Path):
+    path = write_cache(tmp_path, [cache_entry(answer="在线合成固定回答")])
+    await build_prepared_audio(path)
+    (path.parent / "prepared_audio" / "unused.wav").unlink()
+    prepared_audio = PreparedAudioStore(
+        load_cache(path),
+        path,
+        TtsProfile(model="company-tts", voice="alloy", speed=1.0),
+    )
+    xzkb = MagicMock()
+    speech = AsyncMock()
+    speech.synthesize.return_value = make_wav()
+    tts_gate = CountingGate()
+    controller, _, xzkb, speech = make_cached_controller(
+        path,
+        xzkb=xzkb,
+        speech=speech,
+        tts_gate=tts_gate,
+        prepared_audio=prepared_audio,
+    )
+
+    result = await controller.ask_text("固定问题")
+
+    assert result.answer == "在线合成固定回答"
+    assert result.audio == make_wav()
+    xzkb.stream_chat.assert_not_called()
+    speech.synthesize.assert_awaited_once_with("在线合成固定回答")
+    assert tts_gate.calls == 1
+    assert prepared_audio.available_entry_ids == ()
 
 
 @pytest.mark.asyncio
@@ -277,8 +390,20 @@ async def test_reset_removes_cached_answer_from_follow_up_context(tmp_path: Path
 @pytest.mark.asyncio
 async def test_web_and_device_controllers_share_one_cache_instance(tmp_path: Path):
     path = write_cache(tmp_path, [cache_entry(answer="共享固定回答")])
-    runtime = create_runtime(make_settings(faq_cache_file=path))
-    speech_synthesize = AsyncMock(return_value=make_wav())
+    prepared_source = make_wav()
+    profile = TtsProfile(model="company-tts", voice="alloy", speed=1.0)
+    generator = FaqAudioGenerator(load_cache(path), path, profile)
+
+    class FakeSynthesizer:
+        async def synthesize(self, _text: str) -> bytes:
+            return prepared_source
+
+    generated = await generator.run(FakeSynthesizer(), entry_ids=["fixed"])
+    assert generated.generated == 1
+    runtime = create_runtime(
+        make_settings(faq_cache_file=path, tts_model="company-tts")
+    )
+    speech_synthesize = AsyncMock()
     speech_transcribe = AsyncMock(return_value="固定问题")
     runtime.speech.synthesize = speech_synthesize
     runtime.speech.transcribe = speech_transcribe
@@ -291,8 +416,15 @@ async def test_web_and_device_controllers_share_one_cache_instance(tmp_path: Pat
 
     assert web_session.controller._faq_cache is runtime.faq_cache
     assert runtime.device._controller._faq_cache is runtime.faq_cache
+    assert runtime.prepared_audio is not None
+    assert web_session.controller._prepared_audio is runtime.prepared_audio
+    assert runtime.device._controller._prepared_audio is runtime.prepared_audio
     assert web_result.answer == "共享固定回答"
     assert device_result.answer == "共享固定回答"
+    assert web_result.audio == prepared_source
+    assert device_result.audio_id is not None
+    assert runtime.device.get_audio(device_result.audio_id) == prepared_source
+    speech_synthesize.assert_not_called()
     runtime.xzkb.stream_chat.assert_not_called()
 
     await runtime.aclose()
@@ -340,6 +472,65 @@ async def test_cached_device_turn_leaves_xzkb_timings_null(tmp_path: Path):
     assert latest["tts_queue_ms"] is not None
     assert latest["tts_synthesis_ms"] is not None
     assert latest["server_pipeline_total_ms"] is not None
+    assert latest["cache_hit"] is True
+    assert latest["cache_entry_id"] == "fixed"
+    assert latest["served_from"] == "faq_online_tts"
+
+
+@pytest.mark.asyncio
+async def test_prepared_device_turn_has_null_xzkb_and_tts_timings(tmp_path: Path):
+    path = write_cache(tmp_path, [cache_entry(answer="设备预生成回答")])
+    prepared_audio, expected_audio = await build_prepared_audio(path)
+    speech = AsyncMock()
+    speech.transcribe.return_value = "固定问题"
+    xzkb = MagicMock()
+    xzkb_gate = CountingGate()
+    tts_gate = CountingGate()
+    state = GuideStateStore()
+    recorder = DeviceLatencyRecorder()
+    controller = GuideController(
+        state,
+        xzkb,
+        speech,
+        xzkb_gate=xzkb_gate,
+        tts_gate=tts_gate,
+        faq_cache=load_cache(path),
+        prepared_audio=prepared_audio,
+    )
+    session = DeviceVoiceSession(
+        state=state,
+        controller=controller,
+        speech=speech,
+        audio=AudioStore(),
+        metrics=recorder,
+    )
+
+    result = await session.process_wav(make_wav())
+    latest = recorder.snapshot()["latest"]
+
+    assert result.audio_id is not None
+    assert session.get_audio(result.audio_id) == expected_audio
+    assert state.snapshot.phase is GuidePhase.SPEAKING
+    xzkb.stream_chat.assert_not_called()
+    speech.synthesize.assert_not_called()
+    assert xzkb_gate.calls == 0
+    assert tts_gate.calls == 0
+    for name in (
+        "xzkb_queue_ms",
+        "xzkb_headers_ms",
+        "xzkb_first_sse_ms",
+        "xzkb_first_content_ms",
+        "xzkb_ttft_ms",
+        "xzkb_generation_ms",
+        "xzkb_total_ms",
+        "tts_queue_ms",
+        "tts_synthesis_ms",
+    ):
+        assert latest[name] is None
+    assert latest["server_pipeline_total_ms"] is not None
+    assert latest["cache_hit"] is True
+    assert latest["cache_entry_id"] == "fixed"
+    assert latest["served_from"] == "prepared_audio"
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,9 @@ class TurnTiming:
     server_pipeline_total_ms: float | None = None
     failure_stage: str | None = None
     error_type: str | None = None
+    cache_hit: bool = False
+    cache_entry_id: str | None = None
+    served_from: str | None = None
     _asr_started_at: float | None = field(default=None, init=False)
     _xzkb_queue_started_at: float | None = field(default=None, init=False)
     _xzkb_started_at: float | None = field(default=None, init=False)
@@ -161,12 +164,30 @@ class TurnTiming:
         self.failure_stage = stage
         self.error_type = type(error).__name__
 
+    def mark_faq(self, entry_id: str, served_from: str) -> None:
+        self.cache_hit = True
+        self.cache_entry_id = entry_id
+        self.served_from = served_from
+
+    def mark_xzkb_online_tts(self) -> None:
+        self.cache_hit = False
+        self.cache_entry_id = None
+        self.served_from = "xzkb_online_tts"
+
+    def mark_local_online_tts(self) -> None:
+        self.cache_hit = False
+        self.cache_entry_id = None
+        self.served_from = "local_online_tts"
+
     def log_payload(self, outcome: str) -> dict[str, object]:
         payload: dict[str, object] = {
             "turn_id": self.turn_id,
             "outcome": outcome,
             "failure_stage": self.failure_stage,
             "error_type": self.error_type,
+            "cache_hit": self.cache_hit,
+            "cache_entry_id": self.cache_entry_id,
+            "served_from": self.served_from,
         }
         payload.update({name: None if (value := getattr(self, name)) is None else round(value, 2) for name in METRIC_NAMES})
         return payload

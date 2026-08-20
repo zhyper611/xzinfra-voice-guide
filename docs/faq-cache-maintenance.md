@@ -48,7 +48,7 @@
 
 ## 预生成语音
 
-第三阶段工具使用项目现有 Settings 和 TTS 配置生成合法、未压缩的 WAV；本阶段不会把 WAV 接入在线问答返回链路。
+第三阶段工具使用项目现有 Settings 和 TTS 配置生成合法、未压缩的 WAV；第四阶段启动时会校验并加载已生成的有效 WAV，接入在线问答返回链路。
 
 在仓库根目录的 PowerShell 中执行：
 
@@ -63,10 +63,12 @@ python -m showroom_guide.faq_audio --env-file .env --priority all --verify-only
 
 工具先把 TTS 结果写入目标目录中的临时文件，并读取声明的全部 PCM 帧校验实际字节数，再提交 WAV 和 manifest。覆盖前会保留同目录备份；两者都成功后才删除备份，提交失败会回滚 WAV 和 manifest。manifest 同时记录完整 WAV 的 `wav_sha256`，内容变化会被标记为 stale。单条失败不会覆盖已有有效 WAV，会继续处理后续条目并以非零状态结束。不要把测试生成的 WAV 或 manifest 提交到仓库。
 
+运行时默认启用 `GUIDE_FAQ_PREPARED_AUDIO_ENABLED=true`。启动时只加载同时通过 manifest、答案/version/TTS profile、WAV 元数据和完整文件哈希校验的条目；缺失、损坏或 stale 的单条音频只记录 warning，并回退在线 TTS。设置为 `false` 或关闭 FAQ 缓存时不会读取 manifest 或 WAV。预生成命中会复用现有会话 AudioStore 和受保护音频 URL，并跳过知识库、TTS gate 和在线 TTS。
+
 ## 上线顺序
 
 1. 先启用 `priority: high` 的条目。
 2. 记录 `cache_hit`、`cache_entry_id` 和 `cache_lookup_ms`。
 3. 观察一段时间内的误命中和未命中问题。
 4. 修正 aliases 后，再逐步启用 `priority: medium` 的条目。
-5. 文本缓存命中时跳过知识库请求，但仍调用在线 TTS；知识库各阶段耗时保持 `null`，TTS 和总耗时正常记录。
+5. 文本缓存命中时，若预生成 WAV 有效则直接播放；否则继续调用在线 TTS。预生成命中时知识库和 TTS 各阶段耗时均保持 `null`，单次 timing 的 `served_from` 为 `prepared_audio`。
