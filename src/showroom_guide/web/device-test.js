@@ -46,6 +46,8 @@ const phaseLabels = {
   error: "出现错误",
 };
 const NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。";
+const REQUEST_TIMEOUT_MS = 180000;
+const STATUS_REQUEST_TIMEOUT_MS = 15000;
 
 let audioObjectUrl = null;
 let pollTimer = null;
@@ -112,13 +114,28 @@ async function responseError(response) {
   return new Error(detail || messages[response.status] || `请求失败（${response.status}）`);
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   requireKey();
   const headers = new Headers(options.headers || {});
   headers.set("X-Device-Key", deviceKey.value.trim());
-  const response = await fetch(path, { ...options, headers });
-  if (!response.ok) throw await responseError(response);
-  return response;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok) throw await responseError(response);
+    return response;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("请求超时，请检查网络后重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 function showError(error) {
@@ -246,7 +263,7 @@ async function refreshState({ showFailure = false } = {}) {
   if (!deviceKey.value.trim() || stateRequestPending || document.hidden) return;
   stateRequestPending = true;
   try {
-    const response = await request("/api/device/state");
+    const response = await request("/api/device/state", {}, STATUS_REQUEST_TIMEOUT_MS);
     renderState(await response.json());
   } catch (error) {
     if (error.message === "设备凭证无效") stopPolling();
@@ -402,7 +419,7 @@ async function refreshMetrics({ showFailure = false } = {}) {
   metricsRequestPending = true;
   latencyRefresh.disabled = true;
   try {
-    const response = await request("/api/device/metrics");
+    const response = await request("/api/device/metrics", {}, STATUS_REQUEST_TIMEOUT_MS);
     renderMetrics(await response.json());
   } catch (error) {
     if (error.message === "设备凭证无效") stopPolling();
@@ -591,6 +608,17 @@ audio.addEventListener("ended", async () => {
     await request("/api/device/playback-finished", { method: "POST" });
     audioHint.textContent = "播放完成，设备已收到回执";
     await refreshState({ showFailure: true });
+  } catch (error) {
+    showError(error);
+  }
+});
+
+audio.addEventListener("error", async () => {
+  if (!deviceKey.value.trim()) return;
+  try {
+    await request("/api/device/playback-finished", { method: "POST" });
+    audioHint.textContent = "语音加载失败，设备状态已恢复";
+    await refreshState({ showFailure: false });
   } catch (error) {
     showError(error);
   }

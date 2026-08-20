@@ -44,6 +44,14 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.tts_base_url == "http://tts.test"
     assert settings.ptt_pin == 17
     assert settings.first_audio_timeout_seconds == 5.0
+    assert settings.playback_timeout_seconds == 300.0
+    assert settings.knowledge_outbox_path == (
+        Path.home()
+        / ".local"
+        / "share"
+        / "showroom-guide"
+        / "knowledge-outbox.sqlite3"
+    )
     assert settings.session_idle_seconds == 1800.0
     assert settings.session_cleanup_seconds == 60.0
     assert settings.max_active_sessions == 100
@@ -160,3 +168,76 @@ def test_settings_rejects_recording_minimum_not_below_maximum():
             local_recording_min_seconds=60,
             local_recording_max_seconds=60,
         )
+
+
+def test_knowledge_capture_requires_write_credentials():
+    with pytest.raises(ValidationError, match="知识补充"):
+        Settings(
+            _env_file=None,
+            xzkb_base_url="http://xzkb.test",
+            xzkb_api_key="test-key",
+            xzkb_empty_search_response="请询问展厅相关内容。",
+            asr_base_url="http://asr.test",
+            asr_api_key="asr-test-key",
+            asr_model="company-asr",
+            tts_base_url="http://tts.test",
+            tts_api_key="tts-test-key",
+            tts_model="company-tts",
+            device_api_key="device-test-key",
+            knowledge_capture_enabled=True,
+        )
+
+
+def test_knowledge_capture_accepts_complete_configuration(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        xzkb_base_url="http://xzkb.test",
+        xzkb_api_key="test-key",
+        xzkb_empty_search_response="请询问展厅相关内容。",
+        asr_base_url="http://asr.test",
+        asr_api_key="asr-test-key",
+        asr_model="company-asr",
+        tts_base_url="http://tts.test",
+        tts_api_key="tts-test-key",
+        tts_model="company-tts",
+        device_api_key="device-test-key",
+        knowledge_capture_enabled=True,
+        xzkb_write_token="write-user-token",
+        xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
+        knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
+        gpio_button_enabled=True,
+    )
+
+    assert settings.knowledge_capture_enabled is True
+    assert settings.gpio_button_enabled is True
+    assert settings.button_hold_seconds == 1.5
+
+
+def test_knowledge_outbox_path_expands_user_home():
+    settings = Settings(
+        _env_file=None,
+        xzkb_base_url="http://xzkb.test",
+        xzkb_api_key="test-key",
+        xzkb_empty_search_response="请询问展厅相关内容。",
+        asr_base_url="http://asr.test",
+        asr_api_key="asr-test-key",
+        asr_model="company-asr",
+        tts_base_url="http://tts.test",
+        tts_api_key="tts-test-key",
+        tts_model="company-tts",
+        device_api_key="device-test-key",
+        knowledge_outbox_path="~/.local/share/custom.sqlite3",
+    )
+
+    assert settings.knowledge_outbox_path == (
+        Path.home() / ".local" / "share" / "custom.sqlite3"
+    )
+
+
+def test_example_environment_is_valid_with_optional_features_disabled():
+    root = Path(__file__).parents[2]
+
+    settings = Settings(_env_file=root / ".env.example")
+
+    assert settings.knowledge_capture_enabled is False
+    assert settings.gpio_button_enabled is False

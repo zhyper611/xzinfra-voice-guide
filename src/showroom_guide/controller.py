@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -38,7 +38,7 @@ class UnlimitedGate:
 
 
 class GuideController:
-    _MAX_ANSWER_CHARS = 320
+    _MAX_ANSWER_CHARS = 1000
     _TRUNCATION_MARK = "……"
     _UNANCHORED_REFERENCES = (
         "这个",
@@ -58,6 +58,7 @@ class GuideController:
         tts_gate: AsyncGate | None = None,
         faq_cache: FaqCache | None = None,
         prepared_audio: PreparedAudioStore | None = None,
+        playback_timeout_seconds: float = 300.0,
     ) -> None:
         self._state: GuideStateStore = state
         self._xzkb = xzkb
@@ -66,6 +67,9 @@ class GuideController:
         self._tts_gate = tts_gate or UnlimitedGate()
         self._faq_cache = faq_cache
         self._prepared_audio = prepared_audio
+        self._playback_timeout_seconds = playback_timeout_seconds
+        self._playback_timeout_handle: asyncio.TimerHandle | None = None
+        self._playback_generation = 0
         self._messages: list[dict[str, str]] = []
         self._question_lock = asyncio.Lock()
 
@@ -76,6 +80,7 @@ class GuideController:
     async def reset(self) -> None:
         if self._question_lock.locked():
             raise QuestionInProgress("问题正在处理中")
+        self._cancel_playback_timeout()
         self._messages.clear()
         await self._state.reset()
 
@@ -91,9 +96,11 @@ class GuideController:
             raise QuestionInProgress("已有问题正在处理中")
 
         async with self._question_lock:
+            self._cancel_playback_timeout()
             return await self._ask_text_locked(normalized, timing)
 
     async def finish_playback(self) -> None:
+        self._cancel_playback_timeout()
         if self._state.snapshot.phase in {
             GuidePhase.SPEAKING,
             GuidePhase.DEGRADED,
@@ -125,6 +132,7 @@ class GuideController:
                         timing.mark_faq(cached_entry.id, "prepared_audio")
                     await self._state.transition(GuidePhase.SPEAKING)
                     await self._state.set_message("正在播放讲解")
+                    self._arm_playback_timeout()
                     return TextQuestionResult(answer=answer, audio=prepared_audio)
                 if timing is not None:
                     timing.mark_faq(cached_entry.id, "faq_online_tts")
@@ -164,21 +172,22 @@ class GuideController:
                         max_tokens,
                         observer,
                     )
-                    async for event in stream:
-                        if timing is not None and event.text.strip():
-                            timing.receive_xzkb_text()
-                        combined = self._state.snapshot.answer + event.text
-                        if len(combined) > self._MAX_ANSWER_CHARS:
-                            content_limit = self._MAX_ANSWER_CHARS - len(
-                                self._TRUNCATION_MARK
-                            )
-                            bounded = (
-                                combined[:content_limit].rstrip()
-                                + self._TRUNCATION_MARK
-                            )
-                            await self._state.set_answer(bounded)
-                            break
-                        await self._state.append_answer(event.text)
+                    async with aclosing(stream):
+                        async for event in stream:
+                            if timing is not None and event.text.strip():
+                                timing.receive_xzkb_text()
+                            combined = self._state.snapshot.answer + event.text
+                            if len(combined) > self._MAX_ANSWER_CHARS:
+                                content_limit = self._MAX_ANSWER_CHARS - len(
+                                    self._TRUNCATION_MARK
+                                )
+                                bounded = (
+                                    combined[:content_limit].rstrip()
+                                    + self._TRUNCATION_MARK
+                                )
+                                await self._state.set_answer(bounded)
+                                break
+                            await self._state.append_answer(event.text)
                     if self._state.snapshot.answer.strip():
                         break
                     await self._state.set_message(
@@ -190,7 +199,7 @@ class GuideController:
                 timing.fail("xzkb_queue", error)
             await self._degrade("当前使用人数较多，请稍后重试")
             raise GuideServiceUnavailable("capacity") from error
-        except (httpx.HTTPError, ValueError) as error:
+        except (httpx.HTTPError, ValueError, TypeError) as error:
             if timing is not None:
                 timing.fail("xzkb", error)
             await self._degrade("知识库暂时不可用，请稍后重试")
@@ -285,8 +294,36 @@ class GuideController:
                 timing.finish_tts_synthesis()
         await self._state.transition(GuidePhase.SPEAKING)
         await self._state.set_message("正在播放讲解")
+        self._arm_playback_timeout()
         return TextQuestionResult(answer=answer, audio=audio)
 
     async def _degrade(self, message: str) -> None:
         await self._state.transition(GuidePhase.DEGRADED)
         await self._state.set_message(message)
+
+    def _arm_playback_timeout(self) -> None:
+        self._cancel_playback_timeout()
+        generation = self._playback_generation
+        loop = asyncio.get_running_loop()
+        self._playback_timeout_handle = loop.call_later(
+            self._playback_timeout_seconds,
+            self._schedule_playback_expiry,
+            generation,
+        )
+
+    def _cancel_playback_timeout(self) -> None:
+        self._playback_generation += 1
+        if self._playback_timeout_handle is not None:
+            self._playback_timeout_handle.cancel()
+            self._playback_timeout_handle = None
+
+    def _schedule_playback_expiry(self, generation: int) -> None:
+        if generation != self._playback_generation:
+            return
+        self._playback_timeout_handle = None
+        asyncio.create_task(self._expire_playback(generation))
+
+    async def _expire_playback(self, generation: int) -> None:
+        if generation != self._playback_generation:
+            return
+        await self.finish_playback()

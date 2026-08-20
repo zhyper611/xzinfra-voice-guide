@@ -6,6 +6,7 @@ import wave
 from pathlib import Path
 
 import pytest
+import showroom_guide.local_audio as local_audio_module
 
 from showroom_guide.local_audio import (
     LocalAudioBusy,
@@ -217,6 +218,26 @@ async def test_no_speech_prompt_uses_the_shared_playback_path():
 
 
 @pytest.mark.asyncio
+async def test_named_prompt_uses_the_shared_playback_path():
+    processes = []
+    prompt = make_wav()
+
+    async def process_factory(*args, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    controller = LocalAudioController(
+        prompts={"asr-unavailable": prompt},
+        process_factory=process_factory,
+    )
+
+    await controller.play_prompt("asr-unavailable")
+
+    assert processes[0].communicated_input == prompt
+
+
+@pytest.mark.asyncio
 async def test_rejects_duplicate_recording_and_stop_without_recording():
     async def process_factory(*args, **kwargs):
         Path(args[-1]).write_bytes(make_wav())
@@ -284,3 +305,65 @@ async def test_aclose_stops_recording_and_removes_file():
     assert process.signals == [signal.SIGINT]
     assert not paths[0].exists()
     assert not controller.is_recording
+
+
+@pytest.mark.asyncio
+async def test_cancelling_recording_start_stops_process_and_removes_file(monkeypatch):
+    original_sleep = asyncio.sleep
+    startup_check_started = asyncio.Event()
+    never_release = asyncio.Event()
+    paths = []
+    process = FakeProcess()
+
+    async def blocked_startup_check(delay):
+        if delay == 0:
+            startup_check_started.set()
+            await never_release.wait()
+            return
+        await original_sleep(delay)
+
+    async def process_factory(*args, **kwargs):
+        path = Path(args[-1])
+        path.write_bytes(make_wav())
+        paths.append(path)
+        return process
+
+    monkeypatch.setattr(local_audio_module.asyncio, "sleep", blocked_startup_check)
+    controller = LocalAudioController(process_factory=process_factory)
+    task = asyncio.create_task(controller.start_recording())
+    await startup_check_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert not paths[0].exists()
+    assert not controller.is_recording
+
+
+@pytest.mark.asyncio
+async def test_cancelling_playback_stops_process_and_clears_state():
+    communicate_started = asyncio.Event()
+    never_release = asyncio.Event()
+
+    class BlockingPlaybackProcess(FakeProcess):
+        async def communicate(self, input=None):
+            communicate_started.set()
+            await never_release.wait()
+
+    process = BlockingPlaybackProcess()
+
+    async def process_factory(*args, **kwargs):
+        return process
+
+    controller = LocalAudioController(process_factory=process_factory)
+    task = asyncio.create_task(controller.play(make_wav()))
+    await communicate_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert not controller.is_playing

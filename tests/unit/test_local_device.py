@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from showroom_guide.controller import QuestionInProgress
+from showroom_guide.controller import GuideServiceUnavailable, QuestionInProgress
 from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceTurnResult,
@@ -15,6 +15,7 @@ from showroom_guide.device import (
 from showroom_guide.local_audio import LocalAudioError, LocalAudioNotRecording
 from showroom_guide.local_device import (
     LastRecordingNotFound,
+    LocalDeviceMode,
     LocalDeviceWorkflow,
 )
 from showroom_guide.models import GuidePhase, GuideSnapshot
@@ -76,6 +77,7 @@ class FakeAudio:
         self.play_start_cue = AsyncMock()
         self.play_stop_cue = AsyncMock()
         self.play_no_speech_prompt = AsyncMock()
+        self.play_prompt = AsyncMock()
         self.start_recording = AsyncMock()
         self.stop_recording = AsyncMock(return_value=self.captured)
         self.abort_recording = AsyncMock()
@@ -135,6 +137,14 @@ async def test_start_stop_processes_and_plays_in_order():
     assert events.index("play") < events.index("finished")
     session.get_audio.assert_called_once_with("audio-id")
     assert not workflow.is_recording
+
+
+def test_idle_property_tracks_device_ownership():
+    workflow = LocalDeviceWorkflow(session=FakeSession(), audio=FakeAudio())
+
+    assert workflow.is_idle is True
+    workflow._mode = LocalDeviceMode.RECORDING
+    assert workflow.is_idle is False
 
 
 @pytest.mark.asyncio
@@ -307,7 +317,7 @@ async def test_uploaded_wav_no_speech_does_not_play_on_raspberry_pi():
 
 
 @pytest.mark.asyncio
-async def test_asr_service_failure_does_not_play_no_speech_prompt():
+async def test_asr_service_failure_plays_local_service_prompt():
     session = FakeSession()
     session.process_recorded_wav.side_effect = DeviceTranscriptionUnavailable()
     audio = FakeAudio()
@@ -318,6 +328,21 @@ async def test_asr_service_failure_does_not_play_no_speech_prompt():
         await workflow.stop_recording()
 
     audio.play_no_speech_prompt.assert_not_awaited()
+    audio.play_prompt.assert_awaited_once_with("asr-unavailable")
+
+
+@pytest.mark.asyncio
+async def test_xzkb_service_failure_plays_local_service_prompt():
+    session = FakeSession()
+    session.process_recorded_wav.side_effect = GuideServiceUnavailable("xzkb")
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+    await workflow.start_recording()
+
+    with pytest.raises(GuideServiceUnavailable):
+        await workflow.stop_recording()
+
+    audio.play_prompt.assert_awaited_once_with("guide-unavailable")
 
 
 @pytest.mark.asyncio
@@ -498,6 +523,7 @@ async def test_degraded_turn_without_audio_returns_to_idle():
 
     assert result.warning == "语音暂时不可用"
     audio.play.assert_not_awaited()
+    audio.play_prompt.assert_awaited_once_with("tts-unavailable")
     session.finish_playback.assert_awaited_once_with()
 
 

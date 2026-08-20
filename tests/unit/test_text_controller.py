@@ -21,7 +21,13 @@ async def async_events(*texts: str):
         yield ChatStreamEvent(text=text)
 
 
-def make_controller(xzkb_gate=None, tts_gate=None):
+def make_controller(
+    xzkb_gate=None,
+    tts_gate=None,
+    faq_cache=None,
+    prepared_audio=None,
+    playback_timeout_seconds=300,
+):
     state = GuideStateStore()
     xzkb = MagicMock()
     speech = AsyncMock()
@@ -31,6 +37,9 @@ def make_controller(xzkb_gate=None, tts_gate=None):
         speech,
         xzkb_gate=xzkb_gate,
         tts_gate=tts_gate,
+        faq_cache=faq_cache,
+        prepared_audio=prepared_audio,
+        playback_timeout_seconds=playback_timeout_seconds,
     )
     return controller, state, xzkb, speech
 
@@ -74,6 +83,72 @@ async def test_local_clarification_records_its_tts_source(tts_failure: bool):
         assert result.warning is not None
     else:
         assert result.audio == b"RIFF\x04\x00\x00\x00WAVE"
+
+
+@pytest.mark.asyncio
+async def test_speaking_state_recovers_when_browser_never_reports_playback():
+    controller, state, xzkb, speech = make_controller(
+        playback_timeout_seconds=0.01
+    )
+    xzkb.stream_chat.return_value = async_events("讲解内容。")
+    speech.synthesize.return_value = b"RIFF\x04\x00\x00\x00WAVE"
+
+    await controller.ask_text("介绍展项")
+    assert state.snapshot.phase is GuidePhase.SPEAKING
+
+    for _ in range(20):
+        if state.snapshot.phase is GuidePhase.IDLE:
+            break
+        await asyncio.sleep(0.01)
+
+    assert state.snapshot.phase is GuidePhase.IDLE
+    assert state.snapshot.message == "输入问题开始讲解"
+
+
+@pytest.mark.asyncio
+async def test_previous_playback_timeout_cannot_clear_next_turn_failure():
+    controller, state, xzkb, speech = make_controller(
+        playback_timeout_seconds=0.02
+    )
+    xzkb.stream_chat.side_effect = [
+        async_events("第一轮回答。"),
+        httpx.ReadTimeout("knowledge unavailable"),
+    ]
+    speech.synthesize.return_value = b"RIFF\x04\x00\x00\x00WAVE"
+
+    await controller.ask_text("第一轮")
+    with pytest.raises(GuideServiceUnavailable):
+        await controller.ask_text("第二轮")
+    await asyncio.sleep(0.04)
+
+    assert state.snapshot.phase is GuidePhase.DEGRADED
+    assert state.snapshot.message == "知识库暂时不可用，请稍后重试"
+
+
+@pytest.mark.asyncio
+async def test_prepared_audio_playback_also_recovers_after_timeout():
+    faq_cache = MagicMock()
+    faq_cache.match.return_value = MagicMock(id="fixed", answer="预生成回答。")
+    prepared_audio = MagicMock()
+    prepared_audio.get.return_value = b"RIFF\x04\x00\x00\x00WAVE"
+    controller, state, xzkb, speech = make_controller(
+        faq_cache=faq_cache,
+        prepared_audio=prepared_audio,
+        playback_timeout_seconds=0.01,
+    )
+
+    await controller.ask_text("高频问题")
+    assert state.snapshot.phase is GuidePhase.SPEAKING
+
+    for _ in range(20):
+        if state.snapshot.phase is GuidePhase.IDLE:
+            break
+        await asyncio.sleep(0.01)
+
+    assert state.snapshot.phase is GuidePhase.IDLE
+    assert state.snapshot.message == "输入问题开始讲解"
+    xzkb.stream_chat.assert_not_called()
+    speech.synthesize.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -131,6 +206,23 @@ async def test_xzkb_failure_enters_degraded_state():
         await controller.ask_text("动态问题")
 
     assert error.value.service == "xzkb"
+    assert state.snapshot.phase is GuidePhase.DEGRADED
+    assert state.snapshot.message == "知识库暂时不可用，请稍后重试"
+
+
+@pytest.mark.asyncio
+async def test_malformed_xzkb_stream_enters_degraded_state():
+    controller, state, xzkb, _ = make_controller()
+
+    async def malformed_stream(_messages):
+        raise TypeError("invalid stream event")
+        yield
+
+    xzkb.stream_chat.side_effect = malformed_stream
+
+    with pytest.raises(GuideServiceUnavailable):
+        await controller.ask_text("动态问题")
+
     assert state.snapshot.phase is GuidePhase.DEGRADED
     assert state.snapshot.message == "知识库暂时不可用，请稍后重试"
 
@@ -215,16 +307,26 @@ async def test_unanchored_reference_asks_for_exhibit_without_calling_xzkb():
 
 
 @pytest.mark.asyncio
-async def test_oversized_xzkb_answer_is_bounded_for_spoken_explanation():
+async def test_oversized_xzkb_answer_is_bounded_and_stream_is_closed():
     controller, state, xzkb, speech = make_controller()
-    xzkb.stream_chat.return_value = async_events("甲" * 500, "乙" * 500)
+    stream_closed = asyncio.Event()
+
+    async def oversized_stream():
+        try:
+            yield ChatStreamEvent(text="甲" * 800)
+            yield ChatStreamEvent(text="乙" * 800)
+        finally:
+            stream_closed.set()
+
+    xzkb.stream_chat.return_value = oversized_stream()
     speech.synthesize.return_value = b"RIFF\x04\x00\x00\x00WAVE"
 
     result = await controller.ask_text("介绍矿山巡检系统")
 
-    assert len(result.answer) <= 321
+    assert len(result.answer) <= 1001
     assert result.answer.endswith("……")
     assert state.snapshot.answer == result.answer
+    assert stream_closed.is_set()
     speech.synthesize.assert_awaited_once_with(result.answer)
 
 

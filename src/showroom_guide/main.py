@@ -22,8 +22,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from showroom_guide.audio_store import AudioNotFound, AudioStore
+from showroom_guide.button_workflow import DeviceButtonWorkflow
 from showroom_guide.clients.speech import SpeechClient
 from showroom_guide.clients.xzkb import XzkbClient
+from showroom_guide.clients.xzkb_knowledge import XzkbKnowledgeClient
 from showroom_guide.concurrency import AsyncGate
 from showroom_guide.config import Settings
 from showroom_guide.controller import (
@@ -41,6 +43,11 @@ from showroom_guide.device import (
 )
 from showroom_guide.faq_cache import FaqCache, load_cache
 from showroom_guide.faq_audio import tts_profile_from_settings
+from showroom_guide.gpio_button import GpioButtonService
+from showroom_guide.knowledge_capture import KnowledgeCaptureSession
+from showroom_guide.knowledge_mode import KnowledgeModeWorkflow
+from showroom_guide.knowledge_outbox import KnowledgeOutbox
+from showroom_guide.knowledge_sync import KnowledgeSyncService
 from showroom_guide.local_audio import LocalAudioController, LocalAudioError
 from showroom_guide.local_device import (
     LastRecordingNotFound,
@@ -60,6 +67,13 @@ WEB_DIR = Path(__file__).parent / "web"
 NO_SPEECH_PROMPT_PATH = (
     Path(__file__).parent / "assets" / "no-speech-detected.wav"
 )
+LOCAL_PROMPT_PATHS = {
+    "asr-unavailable": Path(__file__).parent / "assets" / "asr-unavailable.wav",
+    "guide-unavailable": Path(__file__).parent / "assets" / "guide-unavailable.wav",
+    "tts-unavailable": Path(__file__).parent / "assets" / "tts-unavailable.wav",
+    "knowledge-mode": Path(__file__).parent / "assets" / "knowledge-mode.wav",
+    "knowledge-saved": Path(__file__).parent / "assets" / "knowledge-saved.wav",
+}
 SESSION_COOKIE = "showroom_session"
 
 
@@ -104,10 +118,20 @@ class Runtime:
     cleanup_seconds: float
     faq_cache: FaqCache | None = None
     prepared_audio: PreparedAudioStore | None = None
+    knowledge_mode: KnowledgeModeWorkflow | None = None
+    knowledge_sync: KnowledgeSyncService | None = None
+    button_workflow: DeviceButtonWorkflow | None = None
+    gpio_button: GpioButtonService | None = None
 
     async def aclose(self) -> None:
+        if self.gpio_button is not None:
+            await self.gpio_button.aclose()
+        if self.knowledge_mode is not None:
+            await self.knowledge_mode.aclose()
         await self.sessions.clear()
         await self.local_device.aclose()
+        if self.knowledge_sync is not None:
+            await self.knowledge_sync.aclose()
         await self.xzkb.aclose()
         await self.speech.aclose()
 
@@ -163,6 +187,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             tts_gate=tts_gate,
             faq_cache=faq_cache,
             prepared_audio=prepared_audio,
+            playback_timeout_seconds=configured.playback_timeout_seconds,
         )
 
     sessions = SessionManager(
@@ -182,18 +207,66 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             ttl_seconds=configured.audio_ttl_seconds,
         ),
     )
+    local_audio = LocalAudioController(
+        sample_rate=configured.sample_rate,
+        capture_device=configured.capture_device,
+        playback_device=configured.playback_device,
+        no_speech_prompt=NO_SPEECH_PROMPT_PATH.read_bytes(),
+        prompts={
+            name: path.read_bytes()
+            for name, path in LOCAL_PROMPT_PATHS.items()
+            if path.exists()
+        },
+    )
     local_device = LocalDeviceWorkflow(
         session=device,
-        audio=LocalAudioController(
-            sample_rate=configured.sample_rate,
-            capture_device=configured.capture_device,
-            playback_device=configured.playback_device,
-            no_speech_prompt=NO_SPEECH_PROMPT_PATH.read_bytes(),
-        ),
+        audio=local_audio,
         max_recording_seconds=configured.local_recording_max_seconds,
         min_recording_seconds=configured.local_recording_min_seconds,
         min_recording_dbfs=configured.local_recording_min_dbfs,
     )
+    knowledge_mode = None
+    knowledge_sync = None
+    if configured.knowledge_capture_enabled:
+        knowledge_client = XzkbKnowledgeClient(
+            configured.xzkb_base_url,
+            configured.xzkb_write_token.get_secret_value(),
+            str(configured.xzkb_knowledge_base_id),
+            folder_id=(
+                str(configured.xzkb_knowledge_folder_id)
+                if configured.xzkb_knowledge_folder_id is not None
+                else None
+            ),
+            timeout=configured.request_timeout_seconds,
+        )
+        knowledge_outbox = KnowledgeOutbox(configured.knowledge_outbox_path)
+        knowledge_sync = KnowledgeSyncService(
+            knowledge_outbox,
+            knowledge_client,
+            poll_seconds=configured.knowledge_sync_interval_seconds,
+        )
+        capture_session = KnowledgeCaptureSession(
+            speech,
+            knowledge_outbox,
+            knowledge_sync,
+        )
+        knowledge_mode = KnowledgeModeWorkflow(
+            local_audio,
+            capture_session,
+            max_recording_seconds=configured.local_recording_max_seconds,
+            min_recording_seconds=configured.local_recording_min_seconds,
+            min_recording_dbfs=configured.local_recording_min_dbfs,
+        )
+    button_workflow = None
+    if configured.gpio_button_enabled or knowledge_mode is not None:
+        button_workflow = DeviceButtonWorkflow(local_device, knowledge_mode)
+    gpio_button = None
+    if configured.gpio_button_enabled:
+        gpio_button = GpioButtonService(
+            pin=configured.ptt_pin,
+            hold_seconds=configured.button_hold_seconds,
+            workflow=button_workflow,
+        )
     return Runtime(
         sessions=sessions,
         device=device,
@@ -205,6 +278,10 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         faq_cache=faq_cache,
         prepared_audio=prepared_audio,
         cleanup_seconds=configured.session_cleanup_seconds,
+        knowledge_mode=knowledge_mode,
+        knowledge_sync=knowledge_sync,
+        button_workflow=button_workflow,
+        gpio_button=gpio_button,
     )
 
 
@@ -229,6 +306,12 @@ def create_app(runtime: Runtime) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         cleanup_task = asyncio.create_task(cleanup_sessions(runtime))
+        knowledge_sync = getattr(runtime, "knowledge_sync", None)
+        gpio_button = getattr(runtime, "gpio_button", None)
+        if knowledge_sync is not None:
+            knowledge_sync.start()
+        if gpio_button is not None:
+            gpio_button.start()
         try:
             yield
         finally:
@@ -239,6 +322,10 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     app = FastAPI(title="展厅 AI 讲解", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+    @app.get("/healthz", include_in_schema=False)
+    async def healthcheck() -> dict[str, str]:
+        return {"status": "ok"}
 
     async def establish_http_session(
         request: Request,
@@ -288,6 +375,15 @@ def create_app(runtime: Runtime) -> FastAPI:
             audio_url=audio_url,
             warning=result.warning,
         )
+
+    async def run_device_dialogue(operation):
+        button_workflow = getattr(runtime, "button_workflow", None)
+        if button_workflow is None:
+            return await operation()
+        try:
+            return await button_workflow.run_dialogue(operation)
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     async def execute_device_turn(
         operation: Awaitable[DeviceTurnResult],
@@ -416,7 +512,9 @@ def create_app(runtime: Runtime) -> FastAPI:
     )
     async def start_device_recording() -> GuideSnapshot:
         try:
-            return await runtime.local_device.start_recording()
+            return await run_device_dialogue(
+                runtime.local_device.start_recording
+            )
         except QuestionInProgress as error:
             detail = str(error) or "设备正在处理上一轮录音"
             raise HTTPException(status_code=409, detail=detail) from error
@@ -429,9 +527,11 @@ def create_app(runtime: Runtime) -> FastAPI:
         dependencies=[Depends(require_device_key)],
     )
     async def stop_device_recording() -> DeviceTurnResponse:
-        return await execute_device_turn(
-            runtime.local_device.stop_recording(),
-            busy_detail="设备正在处理上一轮录音",
+        return await run_device_dialogue(
+            lambda: execute_device_turn(
+                runtime.local_device.stop_recording(),
+                busy_detail="设备正在处理上一轮录音",
+            )
         )
 
     @app.post(
@@ -441,7 +541,9 @@ def create_app(runtime: Runtime) -> FastAPI:
     )
     async def replay_device_recording() -> Response:
         try:
-            await runtime.local_device.replay_last_recording()
+            await run_device_dialogue(
+                runtime.local_device.replay_last_recording
+            )
         except LastRecordingNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except QuestionInProgress as error:
@@ -466,8 +568,10 @@ def create_app(runtime: Runtime) -> FastAPI:
         if len(audio) > runtime.device_max_upload_bytes:
             raise HTTPException(status_code=413, detail="录音文件过大")
 
-        return await execute_device_turn(
-            runtime.local_device.process_upload(audio)
+        return await run_device_dialogue(
+            lambda: execute_device_turn(
+                runtime.local_device.process_upload(audio)
+            )
         )
 
     @app.get(
@@ -501,7 +605,7 @@ def create_app(runtime: Runtime) -> FastAPI:
     )
     async def reset_device() -> Response:
         try:
-            await runtime.local_device.reset()
+            await run_device_dialogue(runtime.local_device.reset)
         except QuestionInProgress as error:
             raise HTTPException(
                 status_code=409,

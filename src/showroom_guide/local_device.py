@@ -8,8 +8,12 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from enum import StrEnum
 
-from showroom_guide.controller import QuestionInProgress
+from showroom_guide.controller import (
+    GuideServiceUnavailable,
+    QuestionInProgress,
+)
 from showroom_guide.device import (
+    DeviceTranscriptionUnavailable,
     DeviceTurnResult,
     DeviceVoiceSession,
     InvalidDeviceAudio,
@@ -65,6 +69,14 @@ class LocalDeviceWorkflow:
     @property
     def is_recording(self) -> bool:
         return self._mode is LocalDeviceMode.RECORDING
+
+    @property
+    def is_idle(self) -> bool:
+        return self._mode is LocalDeviceMode.IDLE and self._session.snapshot.phase in {
+            GuidePhase.IDLE,
+            GuidePhase.ERROR,
+            GuidePhase.DEGRADED,
+        }
 
     @property
     def has_last_recording(self) -> bool:
@@ -220,6 +232,18 @@ class LocalDeviceWorkflow:
             async with self._lifecycle_lock:
                 self._mode = LocalDeviceMode.IDLE
             raise
+        except DeviceTranscriptionUnavailable:
+            await self._wait_for_cue(cue_task)
+            await self._play_prompt_safely("asr-unavailable")
+            async with self._lifecycle_lock:
+                self._mode = LocalDeviceMode.IDLE
+            raise
+        except GuideServiceUnavailable:
+            await self._wait_for_cue(cue_task)
+            await self._play_prompt_safely("guide-unavailable")
+            async with self._lifecycle_lock:
+                self._mode = LocalDeviceMode.IDLE
+            raise
         except BaseException:
             await self._wait_for_cue(cue_task)
             async with self._lifecycle_lock:
@@ -229,6 +253,8 @@ class LocalDeviceWorkflow:
         await self._wait_for_cue(cue_task)
 
         if result.audio_id is None:
+            if result.warning is not None:
+                await self._play_prompt_safely("tts-unavailable")
             await self._session.finish_playback()
             async with self._lifecycle_lock:
                 self._mode = LocalDeviceMode.IDLE
@@ -326,6 +352,16 @@ class LocalDeviceWorkflow:
         except Exception:
             logger.warning(
                 "local_no_speech_prompt_failed",
+                exc_info=True,
+            )
+
+    async def _play_prompt_safely(self, name: str) -> None:
+        try:
+            await self._audio.play_prompt(name)
+        except Exception:
+            logger.warning(
+                "local_audio_prompt_failed",
+                extra={"prompt": name},
                 exc_info=True,
             )
 

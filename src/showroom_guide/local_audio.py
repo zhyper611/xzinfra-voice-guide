@@ -71,6 +71,7 @@ class LocalAudioController:
         capture_device: str = "default",
         playback_device: str = "default",
         no_speech_prompt: bytes | None = None,
+        prompts: dict[str, bytes] | None = None,
         process_factory: ProcessFactory = asyncio.create_subprocess_exec,
         process_stop_seconds: float = 5.0,
     ) -> None:
@@ -78,6 +79,7 @@ class LocalAudioController:
         self._capture_device = capture_device
         self._playback_device = playback_device
         self._no_speech_prompt = no_speech_prompt
+        self._prompts = dict(prompts or {})
         self._process_factory = process_factory
         self._process_stop_seconds = process_stop_seconds
         self._record_process: asyncio.subprocess.Process | None = None
@@ -125,24 +127,32 @@ class LocalAudioController:
             ]
         )
 
+        process = None
         try:
             process = await self._process_factory(
                 *command,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
+            self._record_process = process
+            self._recording_path = path
             await asyncio.sleep(0)
             if process.returncode is not None:
                 await process.communicate()
                 raise LocalAudioError("无法启动录音设备，请检查默认输入")
-        except (OSError, LocalAudioError) as error:
+        except BaseException as error:
+            if process is not None and process.returncode is None:
+                process.terminate()
+                await self._wait_for_exit(process)
+            if self._record_process is process:
+                self._record_process = None
+                self._recording_path = None
             path.unlink(missing_ok=True)
             if isinstance(error, LocalAudioError):
                 raise
-            raise LocalAudioError("无法启动录音设备，请检查默认输入") from error
-
-        self._record_process = process
-        self._recording_path = path
+            if isinstance(error, OSError):
+                raise LocalAudioError("无法启动录音设备，请检查默认输入") from error
+            raise
 
     async def stop_recording(self) -> bytes:
         if self._record_process is None or self._recording_path is None:
@@ -169,6 +179,9 @@ class LocalAudioController:
         except OSError as error:
             raise LocalAudioError("无法读取录音，请重新尝试") from error
         finally:
+            if process.returncode is None:
+                process.terminate()
+                await self._wait_for_exit(process)
             path.unlink(missing_ok=True)
 
     async def abort_recording(self) -> None:
@@ -208,7 +221,11 @@ class LocalAudioController:
             if process.returncode != 0:
                 raise LocalAudioError("扬声器播放失败，请检查默认输出")
         finally:
-            self._playback_process = None
+            if process.returncode is None:
+                process.terminate()
+                await self._wait_for_exit(process)
+            if self._playback_process is process:
+                self._playback_process = None
 
     async def play_start_cue(self) -> None:
         await self.play(self._start_cue)
@@ -220,6 +237,12 @@ class LocalAudioController:
         if self._no_speech_prompt is None:
             raise LocalAudioError("未配置无语音提示音频")
         await self.play(self._no_speech_prompt)
+
+    async def play_prompt(self, name: str) -> None:
+        prompt = self._prompts.get(name)
+        if prompt is None:
+            raise LocalAudioError(f"未配置语音提示：{name}")
+        await self.play(prompt)
 
     async def stop_playback(self) -> None:
         process = self._playback_process

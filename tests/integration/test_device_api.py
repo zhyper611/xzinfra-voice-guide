@@ -125,6 +125,24 @@ def test_device_state_returns_snapshot():
     assert response.json()["has_last_recording"] is True
 
 
+def test_device_recording_is_rejected_during_knowledge_mode():
+    runtime = FakeRuntime()
+    runtime.button_workflow = MagicMock()
+    runtime.button_workflow.run_dialogue = AsyncMock(
+        side_effect=RuntimeError("设备当前处于知识补充模式")
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/recording/start",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "设备当前处于知识补充模式"}
+    runtime.local_device.start_recording.assert_not_awaited()
+
+
 def test_device_metrics_returns_protected_read_only_snapshot():
     runtime = FakeRuntime()
     runtime.device.metrics_snapshot.return_value = {

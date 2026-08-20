@@ -268,3 +268,33 @@ async def test_unexpected_xzkb_error_is_not_spoken():
                     [{"role": "user", "content": "问题"}]
                 )
             ]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_malformed_xzkb_delta_is_rejected_as_response_error():
+    body = '\n'.join(
+        [
+            'data: {"choices":[{"delta":"invalid"}]}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    respx.post(
+        "http://xzkb.test/kb-matrix/data-infra/v1/chat/completions"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    async with XzkbClient("http://xzkb.test", "device-key") as client:
+        with pytest.raises(ValueError, match="XZKB"):
+            _ = [
+                event
+                async for event in client.stream_chat(
+                    [{"role": "user", "content": "问题"}]
+                )
+            ]
