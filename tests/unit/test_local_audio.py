@@ -87,7 +87,8 @@ async def test_records_pcm_wav_and_plays_from_stdin():
     )
     assert "--target" not in record_args
     assert record_kwargs["stderr"] is asyncio.subprocess.PIPE
-    assert os.stat(recording_path).st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert os.stat(recording_path).st_mode & 0o777 == 0o600
 
     captured = await controller.stop_recording()
 

@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "entry_id": "eight_workshops_overview",
+      "entry_version": 1,
+      "answer_sha256": "08caed97f5d6a3c80a1fe5c13fadd29740efb1f59bb1b6040b35422790397d99",
+      "audio_file": "prepared_audio/eight_workshops_overview.wav",
+      "tts_model": "VoxCPM-0.5B",
+      "tts_voice": "alloy",
+      "tts_speed": 1.0,
+      "wav_sha256": "cf47abf40819fc99ee0e7e7c619ca6024ebb6197f608188c848745cd3410bdda",
+      "sample_rate": 16000,
+      "channels": 1,
+      "sample_width": 2,
+      "frames": 596480,
+      "duration_seconds": 37.28
+    }
+  ]
+}

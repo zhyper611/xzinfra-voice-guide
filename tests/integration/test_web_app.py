@@ -106,7 +106,8 @@ def test_device_test_styles_are_branded_responsive_and_accessible():
     assert "@media (max-width: 760px)" in response.text
     assert "@media (prefers-reduced-motion: reduce)" in response.text
     assert ":focus-visible" in response.text
-    assert "button:disabled {\n  cursor: not-allowed;" in response.text
+    normalized_css = response.text.replace("\r\n", "\n")
+    assert "button:disabled {\n  cursor: not-allowed;" in normalized_css
 
 
 def test_device_test_script_uses_protected_device_contract_without_persisting_key():
