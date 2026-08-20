@@ -512,7 +512,11 @@ def resolve_manifest_path(
     )
 
 
-def load_manifest(path: str | Path) -> dict[str, dict[str, Any]]:
+def load_manifest(
+    path: str | Path,
+    *,
+    strict: bool = False,
+) -> dict[str, dict[str, Any]]:
     """Load a manifest, treating missing or malformed data as stale."""
 
     manifest_path = Path(path)
@@ -520,7 +524,11 @@ def load_manifest(path: str | Path) -> dict[str, dict[str, Any]]:
         return {}
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        return {}
+    except (OSError, UnicodeError):
+        if strict:
+            raise
         return {}
 
     if isinstance(raw, dict):

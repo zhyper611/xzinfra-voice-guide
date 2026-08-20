@@ -1,0 +1,16 @@
+{
+  "entry_id": "pd_disaggregation",
+  "entry_version": 1,
+  "answer_sha256": "133177b51b4792af9af0e0f3b3f6ff69d24d62e145cd4f4e34d509175d1bfb93",
+  "tts_model": "VoxCPM-0.5B",
+  "tts_voice": "alloy",
+  "tts_speed": 1.0,
+  "wav_sha256": "41720b562b144f6dd7148b8e0844700b7582dba9286507df9aedd5d8d774f6fd",
+  "wav_file": "pd_disaggregation-163c50ef27ae4e92bbf610619b69eef5.wav",
+  "generated_at": "2026-08-20T08:57:16.587952Z",
+  "sample_rate": 16000,
+  "channels": 1,
+  "sample_width": 2,
+  "frames": 404480,
+  "duration_seconds": 25.28
+}

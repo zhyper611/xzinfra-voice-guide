@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     faq_cache_enabled: bool = True
     faq_cache_file: Path = Path("config/faq_cache.yaml")
     faq_prepared_audio_enabled: bool = True
+    faq_admin_enabled: bool = False
+    faq_admin_api_key: SecretStr | None = None
     asr_base_url: str = Field(min_length=1)
     asr_api_key: SecretStr = Field(min_length=8)
     asr_model: str = Field(min_length=1)
@@ -69,4 +71,15 @@ class Settings(BaseSettings):
     def validate_local_recording_limits(self) -> Self:
         if self.local_recording_min_seconds >= self.local_recording_max_seconds:
             raise ValueError("最短录音时长必须小于最长录音时长")
+        return self
+
+    @model_validator(mode="after")
+    def validate_faq_admin_credentials(self) -> Self:
+        if self.faq_admin_enabled:
+            key = self.faq_admin_api_key
+            if key is None or len(key.get_secret_value()) < 16:
+                raise ValueError(
+                    "faq_admin_api_key must contain at least 16 characters "
+                    "when faq_admin_enabled is true"
+                )
         return self

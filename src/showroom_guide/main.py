@@ -3,7 +3,7 @@ import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Awaitable
+from typing import AsyncIterator, Awaitable, Literal
 
 from fastapi import (
     Depends,
@@ -20,6 +20,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, field_validator
+from starlette.concurrency import run_in_threadpool
 
 from showroom_guide.audio_store import AudioNotFound, AudioStore
 from showroom_guide.clients.speech import SpeechClient
@@ -41,6 +42,20 @@ from showroom_guide.device import (
 )
 from showroom_guide.faq_cache import FaqCache, load_cache
 from showroom_guide.faq_audio import tts_profile_from_settings
+from showroom_guide.faq_admin import (
+    FaqAdminAudioAction,
+    FaqAdminConfigError,
+    FaqAdminDeleteRequest,
+    FaqAdminEntryAction,
+    FaqAdminEntryCreate,
+    FaqAdminEntryNotFound,
+    FaqAdminEntryUpdate,
+    FaqAdminOperationConflict,
+    FaqAdminSynthesisError,
+    FaqAdminUnavailable,
+    FaqCacheReadService,
+    FaqCacheSnapshot,
+)
 from showroom_guide.local_audio import LocalAudioController, LocalAudioError
 from showroom_guide.local_device import (
     LastRecordingNotFound,
@@ -104,6 +119,8 @@ class Runtime:
     cleanup_seconds: float
     faq_cache: FaqCache | None = None
     prepared_audio: PreparedAudioStore | None = None
+    faq_admin_service: FaqCacheReadService | None = None
+    faq_admin_api_key: SecretStr | None = None
 
     async def aclose(self) -> None:
         await self.sessions.clear()
@@ -119,11 +136,12 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         if configured.faq_cache_enabled
         else None
     )
+    tts_profile = tts_profile_from_settings(configured)
     prepared_audio = (
         PreparedAudioStore(
             faq_cache,
             configured.faq_cache_file,
-            tts_profile_from_settings(configured),
+            tts_profile,
         )
         if faq_cache is not None and configured.faq_prepared_audio_enabled
         else None
@@ -144,6 +162,14 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         configured.tts_voice,
         configured.tts_speed,
         configured.request_timeout_seconds,
+    )
+    faq_admin_service = (
+        FaqCacheReadService(configured.faq_cache_file, tts_profile, speech)
+        if configured.faq_admin_enabled
+        else None
+    )
+    faq_admin_api_key = (
+        configured.faq_admin_api_key if configured.faq_admin_enabled else None
     )
     xzkb_gate = AsyncGate(
         configured.xzkb_concurrency,
@@ -204,6 +230,8 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         speech=speech,
         faq_cache=faq_cache,
         prepared_audio=prepared_audio,
+        faq_admin_service=faq_admin_service,
+        faq_admin_api_key=faq_admin_api_key,
         cleanup_seconds=configured.session_cleanup_seconds,
     )
 
@@ -276,6 +304,29 @@ def create_app(runtime: Runtime) -> FastAPI:
         if not secrets.compare_digest(provided, expected):
             raise HTTPException(status_code=401, detail="设备凭证无效")
 
+    def require_faq_admin_key(
+        response: Response,
+        x_faq_admin_key: str | None = Header(
+            default=None,
+            alias="X-FAQ-Admin-Key",
+        ),
+    ) -> None:
+        response.headers["Cache-Control"] = "no-store"
+        if runtime.faq_admin_service is None or runtime.faq_admin_api_key is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Not Found",
+                headers={"Cache-Control": "no-store"},
+            )
+        expected = runtime.faq_admin_api_key.get_secret_value().encode("utf-8")
+        provided = (x_faq_admin_key or "").encode("utf-8")
+        if not secrets.compare_digest(provided, expected):
+            raise HTTPException(
+                status_code=401,
+                detail="FAQ admin key invalid",
+                headers={"Cache-Control": "no-store"},
+            )
+
     def device_turn_response(result: DeviceTurnResult) -> DeviceTurnResponse:
         audio_url = (
             f"/api/device/audio/{result.audio_id}"
@@ -334,6 +385,12 @@ def create_app(runtime: Runtime) -> FastAPI:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/faq-cache", include_in_schema=False)
+    async def faq_cache_page() -> FileResponse:
+        response = FileResponse(WEB_DIR / "faq-cache.html", media_type="text/html")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.post("/api/questions", response_model=QuestionResponse)
     async def ask_question(
         payload: QuestionRequest,
@@ -374,6 +431,225 @@ def create_app(runtime: Runtime) -> FastAPI:
             media_type="audio/wav",
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get(
+        "/api/faq-cache",
+        response_model=FaqCacheSnapshot,
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def get_faq_cache(response: Response) -> FaqCacheSnapshot:
+        service = runtime.faq_admin_service
+        if service is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Not Found",
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            snapshot = await run_in_threadpool(service.snapshot)
+        except FaqAdminConfigError as error:
+            raise HTTPException(
+                status_code=422,
+                detail="\u9ad8\u9891\u95ee\u7b54\u914d\u7f6e\u6821\u9a8c\u5931\u8d25",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="\u9ad8\u9891\u95ee\u7b54\u914d\u7f6e\u6682\u65f6\u65e0\u6cd5\u8bfb\u53d6",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        response.headers["Cache-Control"] = "no-store"
+        return snapshot
+
+    @app.post(
+        "/api/faq-cache/entries",
+        response_model=FaqAdminEntryAction,
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def create_faq_entry(
+        payload: FaqAdminEntryCreate,
+        response: Response,
+    ) -> FaqAdminEntryAction:
+        service = runtime.faq_admin_service
+        assert service is not None
+        try:
+            result = await service.create_entry(payload)
+        except FaqAdminOperationConflict as error:
+            raise HTTPException(
+                409,
+                "条目 ID 已存在",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminConfigError as error:
+            raise HTTPException(
+                422,
+                "高频问答配置校验失败",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminUnavailable as error:
+            raise HTTPException(
+                503,
+                "高频问答配置暂时无法写入",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @app.put(
+        "/api/faq-cache/{entry_id}",
+        response_model=FaqAdminEntryAction,
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def update_faq_entry(
+        entry_id: str,
+        payload: FaqAdminEntryUpdate,
+        response: Response,
+    ) -> FaqAdminEntryAction:
+        service = runtime.faq_admin_service
+        assert service is not None
+        try:
+            result = await service.update_entry(entry_id, payload)
+        except FaqAdminEntryNotFound as error:
+            raise HTTPException(
+                404,
+                "高频问答条目不存在",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminOperationConflict as error:
+            raise HTTPException(
+                409,
+                "条目已被其他操作修改，请刷新后重试",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminConfigError as error:
+            raise HTTPException(
+                422,
+                "高频问答配置校验失败，请检查别名和匹配规则",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminUnavailable as error:
+            raise HTTPException(
+                503,
+                "高频问答配置暂时无法写入",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @app.delete(
+        "/api/faq-cache/{entry_id}",
+        response_model=FaqAdminEntryAction,
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def delete_faq_entry(
+        entry_id: str,
+        payload: FaqAdminDeleteRequest,
+        response: Response,
+    ) -> FaqAdminEntryAction:
+        service = runtime.faq_admin_service
+        assert service is not None
+        try:
+            result = await service.delete_entry(
+                entry_id,
+                payload.expected_edit_token,
+            )
+        except FaqAdminEntryNotFound as error:
+            raise HTTPException(
+                404,
+                "高频问答条目不存在",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminOperationConflict as error:
+            raise HTTPException(
+                409,
+                "条目已变化或不能删除最后一个条目",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminConfigError as error:
+            raise HTTPException(
+                422,
+                "高频问答配置校验失败",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except FaqAdminUnavailable as error:
+            raise HTTPException(
+                503,
+                "高频问答配置暂时无法写入",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @app.post(
+        "/api/faq-cache/{entry_id}/audio/generate",
+        response_model=FaqAdminAudioAction,
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def generate_faq_audio(
+        entry_id: str,
+        response: Response,
+    ) -> FaqAdminAudioAction:
+        service = runtime.faq_admin_service
+        assert service is not None
+        try:
+            result = await service.generate_draft(entry_id)
+        except FaqAdminEntryNotFound as error:
+            raise HTTPException(404, "高频问答条目不存在", headers={"Cache-Control": "no-store"}) from error
+        except FaqAdminOperationConflict as error:
+            raise HTTPException(409, "当前条目不能生成语音", headers={"Cache-Control": "no-store"}) from error
+        except FaqAdminSynthesisError as error:
+            raise HTTPException(503, "语音合成暂时不可用", headers={"Cache-Control": "no-store"}) from error
+        except (FaqAdminConfigError, FaqAdminUnavailable) as error:
+            raise HTTPException(503, "高频问答配置暂时无法读取", headers={"Cache-Control": "no-store"}) from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @app.get(
+        "/api/faq-cache/{entry_id}/audio",
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def get_faq_admin_audio(
+        entry_id: str,
+        source: Literal["draft", "active"] = "draft",
+    ) -> Response:
+        service = runtime.faq_admin_service
+        assert service is not None
+        try:
+            content = await run_in_threadpool(service.get_audio, entry_id, source)
+        except FaqAdminEntryNotFound as error:
+            raise HTTPException(404, "高频问答条目不存在", headers={"Cache-Control": "no-store"}) from error
+        except FaqAdminOperationConflict as error:
+            raise HTTPException(404, "可试听语音不存在", headers={"Cache-Control": "no-store"}) from error
+        except (FaqAdminConfigError, FaqAdminUnavailable) as error:
+            raise HTTPException(503, "高频问答配置暂时无法读取", headers={"Cache-Control": "no-store"}) from error
+        return Response(
+            content=content,
+            media_type="audio/wav",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post(
+        "/api/faq-cache/{entry_id}/audio/approve",
+        response_model=FaqAdminAudioAction,
+        dependencies=[Depends(require_faq_admin_key)],
+    )
+    async def approve_faq_audio(
+        entry_id: str,
+        response: Response,
+    ) -> FaqAdminAudioAction:
+        service = runtime.faq_admin_service
+        assert service is not None
+        try:
+            result = await service.approve_draft(entry_id)
+        except FaqAdminEntryNotFound as error:
+            raise HTTPException(404, "高频问答条目不存在", headers={"Cache-Control": "no-store"}) from error
+        except FaqAdminOperationConflict as error:
+            raise HTTPException(409, "没有可审批的最新语音草稿", headers={"Cache-Control": "no-store"}) from error
+        except (FaqAdminConfigError, FaqAdminUnavailable) as error:
+            raise HTTPException(503, "语音安装失败，原正式文件保持不变", headers={"Cache-Control": "no-store"}) from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
 
     @app.post("/api/playback-finished", status_code=204)
     async def playback_finished(request: Request) -> Response:

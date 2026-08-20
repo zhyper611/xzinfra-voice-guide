@@ -112,6 +112,64 @@ def test_device_test_styles_are_branded_responsive_and_accessible():
     assert "button:disabled {\n  cursor: not-allowed;" in css
 
 
+def test_faq_cache_page_is_a_separate_no_store_admin_workspace():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/faq-cache")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert "高频问答缓存" in response.text
+    assert 'id="admin-key"' in response.text
+    assert 'id="entry-list"' in response.text
+    assert 'id="entry-detail"' in response.text
+    assert 'id="generate-audio"' in response.text
+    assert 'id="play-draft"' in response.text
+    assert 'id="approve-audio"' in response.text
+    assert 'id="review-audio"' in response.text
+    assert 'id="new-entry-button"' in response.text
+    assert 'id="edit-entry-button"' in response.text
+    assert 'id="delete-entry-button"' in response.text
+    assert 'id="entry-editor"' in response.text
+    assert 'id="entry-editor-form"' in response.text
+    assert '<span>01</span>' in response.text
+    assert '<span>02</span>' in response.text
+    assert '<span>03</span>' in response.text
+    assert 'src="/static/faq-cache.js?v=' in response.text
+    assert 'href="/static/faq-cache.css?v=' in response.text
+    assert "device-test" not in response.text
+    assert "showroom_session=" not in response.headers.get("set-cookie", "")
+
+
+def test_faq_cache_assets_are_responsive_and_do_not_persist_admin_key():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        css = client.get("/static/faq-cache.css").text.replace("\r\n", "\n")
+        script = client.get("/static/faq-cache.js").text
+
+    assert "--brand: #1c6af6" in css
+    assert ".workspace" in css
+    assert "@media (max-width: 760px)" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    assert ":focus-visible" in css
+    assert 'fetch("/api/faq-cache"' in script
+    assert '"X-FAQ-Admin-Key": key' in script
+    assert 'cache: "no-store"' in script
+    assert "/audio/generate" in script
+    assert "?source=${source}" in script
+    assert "/audio/approve" in script
+    assert "reviewedDraftId !== entry.id" in script
+    assert 'reviewAudio.addEventListener("ended"' in script
+    assert 'method = "PUT"' in script
+    assert 'method: "DELETE"' in script
+    assert 'expected_edit_token: entry.edit_token' in script
+    assert 'payload.expected_edit_token = editorEntry.edit_token' in script
+    assert "entryEditor.showModal()" in script
+    assert "localStorage" not in script
+    assert "sessionStorage" not in script
+    assert ".innerHTML" not in script
+
+
 def test_device_test_script_uses_protected_device_contract_without_persisting_key():
     runtime = FakeRuntime()
     with TestClient(create_app(runtime)) as client:
