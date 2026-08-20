@@ -36,12 +36,16 @@ from showroom_guide.device import (
     DeviceTurnResult,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    NO_SPEECH_MESSAGE,
     NoSpeechDetected,
 )
 from showroom_guide.faq_cache import FaqCache, load_cache
 from showroom_guide.faq_audio import tts_profile_from_settings
 from showroom_guide.local_audio import LocalAudioController, LocalAudioError
-from showroom_guide.local_device import LocalDeviceWorkflow
+from showroom_guide.local_device import (
+    LastRecordingNotFound,
+    LocalDeviceWorkflow,
+)
 from showroom_guide.models import GuideSnapshot
 from showroom_guide.prepared_audio import PreparedAudioStore
 from showroom_guide.sessions import (
@@ -53,6 +57,9 @@ from showroom_guide.state import GuideStateStore
 
 
 WEB_DIR = Path(__file__).parent / "web"
+NO_SPEECH_PROMPT_PATH = (
+    Path(__file__).parent / "assets" / "no-speech-detected.wav"
+)
 SESSION_COOKIE = "showroom_session"
 
 
@@ -79,6 +86,10 @@ class DeviceTurnResponse(BaseModel):
     answer: str
     audio_url: str | None
     warning: str | None
+
+
+class DeviceStateResponse(GuideSnapshot):
+    has_last_recording: bool
 
 
 @dataclass
@@ -177,9 +188,11 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             sample_rate=configured.sample_rate,
             capture_device=configured.capture_device,
             playback_device=configured.playback_device,
+            no_speech_prompt=NO_SPEECH_PROMPT_PATH.read_bytes(),
         ),
         max_recording_seconds=configured.local_recording_max_seconds,
         min_recording_seconds=configured.local_recording_min_seconds,
+        min_recording_dbfs=configured.local_recording_min_dbfs,
     )
     return Runtime(
         sessions=sessions,
@@ -291,7 +304,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         except NoSpeechDetected as error:
             raise HTTPException(
                 status_code=422,
-                detail="未识别到有效语音，请重试",
+                detail=str(error) or NO_SPEECH_MESSAGE,
             ) from error
         except DeviceTranscriptionUnavailable as error:
             raise HTTPException(
@@ -380,11 +393,14 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     @app.get(
         "/api/device/state",
-        response_model=GuideSnapshot,
+        response_model=DeviceStateResponse,
         dependencies=[Depends(require_device_key)],
     )
-    async def get_device_state() -> GuideSnapshot:
-        return runtime.device.snapshot
+    async def get_device_state() -> DeviceStateResponse:
+        return DeviceStateResponse(
+            **runtime.device.snapshot.model_dump(),
+            has_last_recording=runtime.local_device.has_last_recording,
+        )
 
     @app.get(
         "/api/device/metrics",
@@ -417,6 +433,25 @@ def create_app(runtime: Runtime) -> FastAPI:
             runtime.local_device.stop_recording(),
             busy_detail="设备正在处理上一轮录音",
         )
+
+    @app.post(
+        "/api/device/recording/replay",
+        status_code=204,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def replay_device_recording() -> Response:
+        try:
+            await runtime.local_device.replay_last_recording()
+        except LastRecordingNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except QuestionInProgress as error:
+            raise HTTPException(
+                status_code=409,
+                detail="设备正在使用，暂时不能播放录音",
+            ) from error
+        except LocalAudioError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return Response(status_code=204)
 
     @app.post(
         "/api/device/turn",

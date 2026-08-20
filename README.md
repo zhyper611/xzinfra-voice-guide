@@ -133,14 +133,17 @@ command -v pw-play
 
 在 `/device-test` 中选择“本机麦克风”，第一次点击开始录音，第二次点击结束并提交。后端会依次执行 ASR、XZKB 和 TTS，再通过树莓派默认扬声器自动播放回答；页面不负责采集或播放本地语音。
 
+停止录音后，测试页会启用“播放刚才的录音”。该按钮通过树莓派默认扬声器播放最近一次麦克风 WAV，成功和失败录音都可回放。录音只在进程内存中保留一份，下一次本地录音、设备重置或服务重启后清除，不提供浏览器下载接口。
+
 本地录音接口：
 
 ```text
 POST /api/device/recording/start
 POST /api/device/recording/stop
+POST /api/device/recording/replay
 ```
 
-两个接口都需要 `X-Device-Key`。录音最长 60 秒，到达上限后自动结束并处理；过短或没有可识别语言的录音不会查询知识库。
+三个接口都需要 `X-Device-Key`。录音最长 60 秒，到达上限后自动结束并处理；过短或没有可识别语言的录音不会查询知识库。
 
 更换专用麦克风和扬声器时，将它们设置为 PipeWire 默认输入和默认输出即可，不需要修改项目代码。也可以通过 `GUIDE_CAPTURE_DEVICE`、`GUIDE_PLAYBACK_DEVICE` 指定稳定的 PipeWire 节点名称。
 

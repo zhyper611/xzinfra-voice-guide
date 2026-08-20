@@ -13,6 +13,7 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    NO_SPEECH_MESSAGE,
     NoSpeechDetected,
     validate_wav,
 )
@@ -177,10 +178,10 @@ async def test_empty_transcript_has_actionable_message():
     speech = TrackingSpeech(["   "])
     session, state, xzkb, speech = make_session(speech)
 
-    with pytest.raises(NoSpeechDetected):
+    with pytest.raises(NoSpeechDetected, match=NO_SPEECH_MESSAGE):
         await session.process_wav(make_wav())
 
-    assert state.snapshot.message == "未识别到有效语音，请重试"
+    assert state.snapshot.message == NO_SPEECH_MESSAGE
     assert xzkb.messages == []
     assert speech.synthesized_text == []
 

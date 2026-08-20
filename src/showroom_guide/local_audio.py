@@ -70,12 +70,14 @@ class LocalAudioController:
         sample_rate: int = 16000,
         capture_device: str = "default",
         playback_device: str = "default",
+        no_speech_prompt: bytes | None = None,
         process_factory: ProcessFactory = asyncio.create_subprocess_exec,
         process_stop_seconds: float = 5.0,
     ) -> None:
         self._sample_rate = sample_rate
         self._capture_device = capture_device
         self._playback_device = playback_device
+        self._no_speech_prompt = no_speech_prompt
         self._process_factory = process_factory
         self._process_stop_seconds = process_stop_seconds
         self._record_process: asyncio.subprocess.Process | None = None
@@ -213,6 +215,11 @@ class LocalAudioController:
 
     async def play_stop_cue(self) -> None:
         await self.play(self._stop_cue)
+
+    async def play_no_speech_prompt(self) -> None:
+        if self._no_speech_prompt is None:
+            raise LocalAudioError("未配置无语音提示音频")
+        await self.play(self._no_speech_prompt)
 
     async def stop_playback(self) -> None:
         process = self._playback_process

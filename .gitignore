@@ -22,6 +22,7 @@ output/
 *.wav
 !config/prepared_audio/
 !config/prepared_audio/*.wav
+!src/showroom_guide/assets/*.wav
 
 # Local development artifacts
 .planning/

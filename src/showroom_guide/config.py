@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     device_max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     local_recording_max_seconds: float = Field(default=60.0, gt=0)
     local_recording_min_seconds: float = Field(default=0.5, gt=0)
+    local_recording_min_dbfs: float = Field(default=-45.0, ge=-96.0, lt=0)
     tts_voice: str = "alloy"
     tts_speed: float = Field(default=1.0, ge=0.25, le=4.0)
     request_timeout_seconds: float = Field(default=30.0, gt=0)

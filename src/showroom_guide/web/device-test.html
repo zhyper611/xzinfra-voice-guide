@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#f5f8ff">
   <title>树莓派语音链路测试 · 新智惠想</title>
   <link rel="icon" href="/static/xzinfra-logo.svg">
-  <link rel="stylesheet" href="/static/device-test.css?v=20260819">
-  <script src="/static/device-test.js?v=20260819" defer></script>
+  <link rel="stylesheet" href="/static/device-test.css?v=20260820">
+  <script src="/static/device-test.js?v=20260820" defer></script>
 </head>
 <body>
   <header class="brand-bar">
@@ -52,6 +52,10 @@
               <span id="local-record-label">开始录音</span>
             </button>
             <p>声音由树莓派默认麦克风采集，回答从默认扬声器播放。</p>
+            <button class="secondary replay-button" id="replay-recording" type="button" disabled>
+              <span class="replay-icon" aria-hidden="true">▶</span>
+              <span id="replay-recording-label">播放刚才的录音</span>
+            </button>
           </section>
 
           <section class="input-mode-panel wav-panel" id="wav-input" role="tabpanel" hidden>

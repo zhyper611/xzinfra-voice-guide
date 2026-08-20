@@ -59,6 +59,7 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.faq_prepared_audio_enabled is True
     assert settings.local_recording_max_seconds == 60.0
     assert settings.local_recording_min_seconds == 0.5
+    assert settings.local_recording_min_dbfs == -45.0
 
 
 def test_settings_reads_multi_user_overrides(monkeypatch):
@@ -79,6 +80,7 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     monkeypatch.setenv("GUIDE_FAQ_CACHE_ENABLED", "false")
     monkeypatch.setenv("GUIDE_FAQ_CACHE_FILE", "custom/faq-cache.yaml")
     monkeypatch.setenv("GUIDE_FAQ_PREPARED_AUDIO_ENABLED", "false")
+    monkeypatch.setenv("GUIDE_LOCAL_RECORDING_MIN_DBFS", "-50")
 
     settings = Settings(_env_file=None)
 
@@ -89,6 +91,7 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     assert settings.faq_cache_enabled is False
     assert settings.faq_cache_file == Path("custom/faq-cache.yaml")
     assert settings.faq_prepared_audio_enabled is False
+    assert settings.local_recording_min_dbfs == -50.0
 
 
 def test_settings_rejects_non_positive_device_upload_limit(monkeypatch):
