@@ -40,12 +40,14 @@ from showroom_guide.device import (
     NoSpeechDetected,
 )
 from showroom_guide.faq_cache import FaqCache, load_cache
+from showroom_guide.faq_audio import tts_profile_from_settings
 from showroom_guide.local_audio import LocalAudioController, LocalAudioError
 from showroom_guide.local_device import (
     LastRecordingNotFound,
     LocalDeviceWorkflow,
 )
 from showroom_guide.models import GuideSnapshot
+from showroom_guide.prepared_audio import PreparedAudioStore
 from showroom_guide.sessions import (
     GuideSession,
     SessionCapacityReached,
@@ -101,6 +103,7 @@ class Runtime:
     speech: SpeechClient
     cleanup_seconds: float
     faq_cache: FaqCache | None = None
+    prepared_audio: PreparedAudioStore | None = None
 
     async def aclose(self) -> None:
         await self.sessions.clear()
@@ -114,6 +117,15 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
     faq_cache = (
         load_cache(configured.faq_cache_file)
         if configured.faq_cache_enabled
+        else None
+    )
+    prepared_audio = (
+        PreparedAudioStore(
+            faq_cache,
+            configured.faq_cache_file,
+            tts_profile_from_settings(configured),
+        )
+        if faq_cache is not None and configured.faq_prepared_audio_enabled
         else None
     )
     xzkb = XzkbClient(
@@ -150,6 +162,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             xzkb_gate=xzkb_gate,
             tts_gate=tts_gate,
             faq_cache=faq_cache,
+            prepared_audio=prepared_audio,
         )
 
     sessions = SessionManager(
@@ -190,6 +203,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         xzkb=xzkb,
         speech=speech,
         faq_cache=faq_cache,
+        prepared_audio=prepared_audio,
         cleanup_seconds=configured.session_cleanup_seconds,
     )
 

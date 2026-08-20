@@ -10,6 +10,7 @@ from showroom_guide.concurrency import AsyncGate, QueueWaitTimeout
 from showroom_guide.faq_cache import FaqCache
 from showroom_guide.latency import TurnTiming
 from showroom_guide.models import GuidePhase
+from showroom_guide.prepared_audio import PreparedAudioStore
 from showroom_guide.state import GuideStateStore
 
 
@@ -56,6 +57,7 @@ class GuideController:
         xzkb_gate: AsyncGate | None = None,
         tts_gate: AsyncGate | None = None,
         faq_cache: FaqCache | None = None,
+        prepared_audio: PreparedAudioStore | None = None,
     ) -> None:
         self._state: GuideStateStore = state
         self._xzkb = xzkb
@@ -63,6 +65,7 @@ class GuideController:
         self._xzkb_gate = xzkb_gate or UnlimitedGate()
         self._tts_gate = tts_gate or UnlimitedGate()
         self._faq_cache = faq_cache
+        self._prepared_audio = prepared_audio
         self._messages: list[dict[str, str]] = []
         self._question_lock = asyncio.Lock()
 
@@ -112,17 +115,34 @@ class GuideController:
                 answer = cached_entry.answer
                 await self._state.set_answer(answer)
                 self._remember_exchange(question, answer)
+                prepared_audio = (
+                    self._prepared_audio.get(cached_entry.id)
+                    if self._prepared_audio is not None
+                    else None
+                )
+                if prepared_audio is not None:
+                    if timing is not None:
+                        timing.mark_faq(cached_entry.id, "prepared_audio")
+                    await self._state.transition(GuidePhase.SPEAKING)
+                    await self._state.set_message("正在播放讲解")
+                    return TextQuestionResult(answer=answer, audio=prepared_audio)
+                if timing is not None:
+                    timing.mark_faq(cached_entry.id, "faq_online_tts")
                 return await self._synthesize_answer(answer, timing)
 
         if self._needs_exhibit_clarification(question):
             answer = "您指的是哪个产品或展项？"
             await self._state.append_answer(answer)
+            if timing is not None:
+                timing.mark_local_online_tts()
             return await self._synthesize_answer(answer, timing)
 
         request_messages = [
             *self._messages,
             {"role": "user", "content": question},
         ]
+        if timing is not None:
+            timing.mark_xzkb_online_tts()
 
         try:
             if timing is not None:

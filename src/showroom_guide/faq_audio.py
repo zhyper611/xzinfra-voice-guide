@@ -559,6 +559,53 @@ def _manifest_matches(record: Mapping[str, Any], expected: Mapping[str, Any]) ->
     return all(record.get(key) == value for key, value in expected.items())
 
 
+def _assessment_for_metadata(
+    entry: CacheEntry,
+    manifest: Mapping[str, Mapping[str, Any]],
+    profile: TtsProfile,
+    metadata: WavMetadata,
+    wav_sha256: str,
+) -> EntryAssessment:
+    record = manifest.get(entry.id)
+    if record is None:
+        return EntryAssessment(entry.id, "stale", "manifest 中没有对应条目", metadata)
+    expected = _expected_manifest_record(entry, profile, metadata, wav_sha256)
+    if not _manifest_matches(record, expected):
+        return EntryAssessment(
+            entry.id,
+            "stale",
+            "YAML、TTS 配置或 WAV 元数据已变化",
+            metadata,
+        )
+    return EntryAssessment(entry.id, "valid", "WAV 和 manifest 均有效", metadata)
+
+
+def assess_entry_content(
+    entry: CacheEntry,
+    content: bytes,
+    manifest: Mapping[str, Mapping[str, Any]],
+    profile: TtsProfile,
+) -> EntryAssessment:
+    """Validate one already-read WAV against the existing manifest rules."""
+
+    try:
+        metadata = validate_wav(content)
+    except WavValidationError as error:
+        return EntryAssessment(
+            entry.id,
+            "invalid",
+            _redact_sensitive_text(str(error)),
+        )
+    wav_sha256 = hashlib.sha256(content).hexdigest()
+    return _assessment_for_metadata(
+        entry,
+        manifest,
+        profile,
+        metadata,
+        wav_sha256,
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     try:
@@ -581,22 +628,14 @@ def assess_entry(
     if not target.is_file():
         return EntryAssessment(entry.id, "missing", "WAV 文件不存在")
     try:
-        metadata = validate_wav(target)
-        wav_sha256 = _sha256_file(target)
-    except WavValidationError as error:
+        content = target.read_bytes()
+    except OSError as error:
         return EntryAssessment(
             entry.id,
             "invalid",
-            _redact_sensitive_text(str(error)),
+            _redact_sensitive_text(f"无法读取 WAV 内容: {error}"),
         )
-
-    record = manifest.get(entry.id)
-    if record is None:
-        return EntryAssessment(entry.id, "stale", "manifest 中没有对应条目", metadata)
-    expected = _expected_manifest_record(entry, profile, metadata, wav_sha256)
-    if not _manifest_matches(record, expected):
-        return EntryAssessment(entry.id, "stale", "YAML、TTS 配置或 WAV 元数据已变化", metadata)
-    return EntryAssessment(entry.id, "valid", "WAV 和 manifest 均有效", metadata)
+    return assess_entry_content(entry, content, manifest, profile)
 
 
 def _write_wav_temp(target: Path, content: bytes) -> tuple[Path, WavMetadata]:
@@ -1067,6 +1106,7 @@ __all__ = [
     "WavMetadata",
     "WavValidationError",
     "assess_entry",
+    "assess_entry_content",
     "build_parser",
     "load_manifest",
     "main",

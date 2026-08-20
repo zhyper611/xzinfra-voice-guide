@@ -11,6 +11,7 @@ from showroom_guide.controller import (
     GuideServiceUnavailable,
     QuestionInProgress,
 )
+from showroom_guide.latency import TurnTiming
 from showroom_guide.models import GuidePhase
 from showroom_guide.state import GuideStateStore
 
@@ -49,6 +50,30 @@ async def test_text_question_streams_answer_and_returns_wav():
     assert result.answer == "第一段。第二段。"
     assert result.audio == wav
     speech.synthesize.assert_awaited_once_with("第一段。第二段。")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tts_failure", [False, True])
+async def test_local_clarification_records_its_tts_source(tts_failure: bool):
+    controller, _, xzkb, speech = make_controller()
+    timing = TurnTiming()
+    if tts_failure:
+        speech.synthesize.side_effect = httpx.ReadTimeout("timeout")
+    else:
+        speech.synthesize.return_value = b"RIFF\x04\x00\x00\x00WAVE"
+
+    result = await controller.ask_text("这个", timing=timing)
+
+    assert result.answer == "您指的是哪个产品或展项？"
+    assert timing.cache_hit is False
+    assert timing.cache_entry_id is None
+    assert timing.served_from == "local_online_tts"
+    xzkb.stream_chat.assert_not_called()
+    if tts_failure:
+        assert result.audio is None
+        assert result.warning is not None
+    else:
+        assert result.audio == b"RIFF\x04\x00\x00\x00WAVE"
 
 
 @pytest.mark.asyncio

@@ -202,6 +202,10 @@ async def test_device_turn_records_stage_boundaries_without_queueing():
     await session.process_wav(wav())
 
     metrics = recorder.snapshot()["metrics"]
+    latest = recorder.snapshot()["latest"]
+    assert latest["cache_hit"] is False
+    assert latest["cache_entry_id"] is None
+    assert latest["served_from"] == "xzkb_online_tts"
     assert metrics["asr_ms"] == {"samples": 1, "p50": 10.0, "p95": 10.0}
     assert metrics["xzkb_queue_ms"] == {"samples": 1, "p50": 0.0, "p95": 0.0}
     assert metrics["xzkb_headers_ms"] == {"samples": 1, "p50": 10.0, "p95": 10.0}
