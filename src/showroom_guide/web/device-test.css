@@ -314,6 +314,25 @@ button:disabled {
   line-height: 1.6;
 }
 
+.replay-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 46px;
+  border-radius: 6px;
+  font-weight: 750;
+}
+
+.replay-icon {
+  width: 16px;
+  flex: 0 0 16px;
+  color: var(--brand);
+  font-size: 13px;
+  line-height: 1;
+}
+
 .record-button {
   display: flex;
   align-items: center;

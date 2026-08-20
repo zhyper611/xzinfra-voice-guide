@@ -21,6 +21,9 @@ class DeviceTranscriptionUnavailable(RuntimeError):
     pass
 
 
+NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。"
+
+
 class NoSpeechDetected(RuntimeError):
     pass
 
@@ -141,7 +144,7 @@ class DeviceVoiceSession:
             try:
                 transcript = (await self._speech.transcribe(io.BytesIO(audio))).strip()
                 if not transcript:
-                    raise NoSpeechDetected
+                    raise NoSpeechDetected(NO_SPEECH_MESSAGE)
             except httpx.HTTPError as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
@@ -150,7 +153,7 @@ class DeviceVoiceSession:
             except NoSpeechDetected as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
-                await self._state.set_message("未识别到有效语音，请重试")
+                await self._state.set_message(NO_SPEECH_MESSAGE)
                 raise
             finally:
                 timing.finish_asr()

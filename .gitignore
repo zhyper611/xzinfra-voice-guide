@@ -20,6 +20,7 @@ output/
 *.log
 *.pid
 *.wav
+!src/showroom_guide/assets/*.wav
 
 # Local development artifacts
 .planning/

@@ -15,6 +15,15 @@ from showroom_guide.local_audio import (
 )
 
 
+PROMPT_PATH = (
+    Path(__file__).parents[2]
+    / "src"
+    / "showroom_guide"
+    / "assets"
+    / "no-speech-detected.wav"
+)
+
+
 def make_wav() -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
@@ -23,6 +32,14 @@ def make_wav() -> bytes:
         audio.setframerate(16000)
         audio.writeframes(b"\x01\x00" * 160)
     return output.getvalue()
+
+
+def test_packaged_no_speech_prompt_is_valid_wav():
+    with wave.open(str(PROMPT_PATH), "rb") as source:
+        assert source.getnchannels() == 1
+        assert source.getsampwidth() == 2
+        assert source.getframerate() > 0
+        assert source.getnframes() > source.getframerate()
 
 
 class FakeProcess:
@@ -87,7 +104,8 @@ async def test_records_pcm_wav_and_plays_from_stdin():
     )
     assert "--target" not in record_args
     assert record_kwargs["stderr"] is asyncio.subprocess.PIPE
-    assert os.stat(recording_path).st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert os.stat(recording_path).st_mode & 0o777 == 0o600
 
     captured = await controller.stop_recording()
 
@@ -176,6 +194,26 @@ async def test_recording_cues_are_valid_distinct_wav_chirps():
             assert source.getsampwidth() == 2
             assert source.getframerate() == 16000
             assert source.getnframes() == 1920
+
+
+@pytest.mark.asyncio
+async def test_no_speech_prompt_uses_the_shared_playback_path():
+    processes = []
+    prompt = make_wav()
+
+    async def process_factory(*args, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    controller = LocalAudioController(
+        no_speech_prompt=prompt,
+        process_factory=process_factory,
+    )
+
+    await controller.play_no_speech_prompt()
+
+    assert processes[0].communicated_input == prompt
 
 
 @pytest.mark.asyncio

@@ -6,19 +6,27 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from showroom_guide.controller import QuestionInProgress
-from showroom_guide.device import DeviceTurnResult, InvalidDeviceAudio
+from showroom_guide.device import (
+    DeviceTranscriptionUnavailable,
+    DeviceTurnResult,
+    InvalidDeviceAudio,
+    NoSpeechDetected,
+)
 from showroom_guide.local_audio import LocalAudioError, LocalAudioNotRecording
-from showroom_guide.local_device import LocalDeviceWorkflow
+from showroom_guide.local_device import (
+    LastRecordingNotFound,
+    LocalDeviceWorkflow,
+)
 from showroom_guide.models import GuidePhase, GuideSnapshot
 
 
-def make_wav(*, frames: int = 16000) -> bytes:
+def make_wav(*, frames: int = 16000, sample: int = 4000) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(16000)
-        audio.writeframes(b"\x01\x00" * frames)
+        audio.writeframes(sample.to_bytes(2, "little", signed=True) * frames)
     return output.getvalue()
 
 
@@ -67,6 +75,7 @@ class FakeAudio:
         self.captured = captured or make_wav()
         self.play_start_cue = AsyncMock()
         self.play_stop_cue = AsyncMock()
+        self.play_no_speech_prompt = AsyncMock()
         self.start_recording = AsyncMock()
         self.stop_recording = AsyncMock(return_value=self.captured)
         self.abort_recording = AsyncMock()
@@ -218,11 +227,257 @@ async def test_short_recording_is_rejected_before_asr():
     )
     await workflow.start_recording()
 
-    with pytest.raises(InvalidDeviceAudio, match="录音时间过短"):
+    with pytest.raises(
+        InvalidDeviceAudio,
+        match="录音时间太短，请听到开始提示音后再说话",
+    ):
         await workflow.stop_recording()
 
     session.process_recorded_wav.assert_not_awaited()
-    session.fail_recording.assert_awaited_once_with("录音时间过短，请重新录音")
+    audio.play_no_speech_prompt.assert_not_awaited()
+    session.fail_recording.assert_awaited_once_with(
+        "录音时间太短，请听到开始提示音后再说话。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_silent_recording_is_rejected_before_asr():
+    session = FakeSession()
+    audio = FakeAudio(captured=make_wav(sample=0))
+    workflow = LocalDeviceWorkflow(
+        session=session,
+        audio=audio,
+        min_recording_dbfs=-45.0,
+    )
+    await workflow.start_recording()
+
+    with pytest.raises(NoSpeechDetected):
+        await workflow.stop_recording()
+
+    session.process_recorded_wav.assert_not_awaited()
+    audio.play_no_speech_prompt.assert_awaited_once_with()
+    session.fail_recording.assert_awaited_once_with(
+        "没有听清您的声音，请靠近麦克风后再试一次。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_asr_empty_result_plays_no_speech_prompt():
+    session = FakeSession()
+    session.process_recorded_wav.side_effect = NoSpeechDetected(
+        "没有听清您的声音，请靠近麦克风后再试一次。"
+    )
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+    await workflow.start_recording()
+
+    with pytest.raises(NoSpeechDetected):
+        await workflow.stop_recording()
+
+    audio.play_no_speech_prompt.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_no_speech_prompt_failure_preserves_detection_error():
+    session = FakeSession()
+    audio = FakeAudio(captured=make_wav(sample=0))
+    audio.play_no_speech_prompt.side_effect = LocalAudioError("output failed")
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+    await workflow.start_recording()
+
+    with pytest.raises(NoSpeechDetected):
+        await workflow.stop_recording()
+
+    session.process_recorded_wav.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uploaded_wav_no_speech_does_not_play_on_raspberry_pi():
+    session = FakeSession()
+    session.process_wav.side_effect = NoSpeechDetected(
+        "没有听清您的声音，请靠近麦克风后再试一次。"
+    )
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    with pytest.raises(NoSpeechDetected):
+        await workflow.process_upload(make_wav())
+
+    audio.play_no_speech_prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_asr_service_failure_does_not_play_no_speech_prompt():
+    session = FakeSession()
+    session.process_recorded_wav.side_effect = DeviceTranscriptionUnavailable()
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+    await workflow.start_recording()
+
+    with pytest.raises(DeviceTranscriptionUnavailable):
+        await workflow.stop_recording()
+
+    audio.play_no_speech_prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_completed_recording_can_be_replayed_locally():
+    captured = make_wav(sample=3500)
+    session = FakeSession(
+        DeviceTurnResult(
+            transcript="问题",
+            answer="文字答案",
+            audio_id=None,
+        )
+    )
+    audio = FakeAudio(captured=captured)
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    await workflow.stop_recording()
+    await workflow.replay_last_recording()
+
+    assert workflow.has_last_recording is True
+    audio.play.assert_awaited_once_with(captured)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pipeline_error",
+    [
+        NoSpeechDetected("没有听清您的声音，请靠近麦克风后再试一次。"),
+        DeviceTranscriptionUnavailable(),
+    ],
+)
+async def test_failed_pipeline_recording_can_be_replayed(pipeline_error):
+    captured = make_wav(sample=3500)
+    session = FakeSession()
+
+    async def fail_pipeline(_source):
+        session.snapshot = GuideSnapshot(
+            phase=GuidePhase.ERROR,
+            message="处理失败",
+        )
+        raise pipeline_error
+
+    session.process_recorded_wav.side_effect = fail_pipeline
+    audio = FakeAudio(captured=captured)
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    with pytest.raises(type(pipeline_error)):
+        await workflow.stop_recording()
+    await workflow.replay_last_recording()
+
+    assert workflow.has_last_recording is True
+    audio.play.assert_awaited_once_with(captured)
+
+
+@pytest.mark.asyncio
+async def test_locally_silent_recording_can_be_replayed():
+    captured = make_wav(sample=0)
+    session = FakeSession()
+    audio = FakeAudio(captured=captured)
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    with pytest.raises(NoSpeechDetected):
+        await workflow.stop_recording()
+    await workflow.replay_last_recording()
+
+    assert workflow.has_last_recording is True
+    audio.play.assert_awaited_once_with(captured)
+
+
+@pytest.mark.asyncio
+async def test_new_recording_reset_and_close_clear_last_recording():
+    session = FakeSession(
+        DeviceTurnResult(transcript="问题", answer="答案", audio_id=None)
+    )
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    await workflow.stop_recording()
+    assert workflow.has_last_recording is True
+
+    await workflow.start_recording()
+    assert workflow.has_last_recording is False
+    await workflow.reset()
+
+    await workflow.start_recording()
+    await workflow.stop_recording()
+    await workflow.reset()
+    assert workflow.has_last_recording is False
+
+    await workflow.start_recording()
+    await workflow.stop_recording()
+    await workflow.aclose()
+    assert workflow.has_last_recording is False
+
+
+@pytest.mark.asyncio
+async def test_failed_recording_start_preserves_last_recording():
+    session = FakeSession(
+        DeviceTurnResult(transcript="问题", answer="答案", audio_id=None)
+    )
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+    await workflow.start_recording()
+    await workflow.stop_recording()
+
+    audio.start_recording.side_effect = LocalAudioError("input failed")
+    with pytest.raises(LocalAudioError):
+        await workflow.start_recording()
+
+    assert workflow.has_last_recording is True
+
+
+@pytest.mark.asyncio
+async def test_replay_requires_recording_and_idle_device():
+    session = FakeSession()
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    with pytest.raises(LastRecordingNotFound, match="没有可播放的录音"):
+        await workflow.replay_last_recording()
+
+    await workflow.start_recording()
+    with pytest.raises(QuestionInProgress):
+        await workflow.replay_last_recording()
+
+
+@pytest.mark.asyncio
+async def test_invalid_capture_does_not_create_last_recording():
+    session = FakeSession()
+    audio = FakeAudio(captured=b"not-a-wav")
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+
+    await workflow.start_recording()
+    with pytest.raises(InvalidDeviceAudio):
+        await workflow.stop_recording()
+
+    assert workflow.has_last_recording is False
+
+
+@pytest.mark.asyncio
+async def test_replay_failure_retains_recording_and_releases_device():
+    session = FakeSession(
+        DeviceTurnResult(transcript="问题", answer="答案", audio_id=None)
+    )
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(session=session, audio=audio)
+    await workflow.start_recording()
+    await workflow.stop_recording()
+
+    audio.play.side_effect = LocalAudioError("output failed")
+    with pytest.raises(LocalAudioError):
+        await workflow.replay_last_recording()
+    assert workflow.has_last_recording is True
+
+    audio.play.side_effect = None
+    await workflow.replay_last_recording()
+    assert audio.play.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,8 @@ def test_device_test_page_is_served_without_creating_visitor_session():
     assert 'id="device-key"' in response.text
     assert 'id="local-record"' in response.text
     assert 'id="local-record-label"' in response.text
+    assert 'id="replay-recording"' in response.text
+    assert 'id="replay-recording-label"' in response.text
     assert 'data-mode="microphone"' in response.text
     assert 'data-mode="wav"' in response.text
     assert 'id="wav-file"' in response.text
@@ -99,14 +101,15 @@ def test_device_test_styles_are_branded_responsive_and_accessible():
         response = client.get("/static/device-test.css")
 
     assert response.status_code == 200
-    assert "--brand: #1c6af6" in response.text
-    assert "--navy: #19213d" in response.text
-    assert ".latency-panel" in response.text
-    assert ".latency-table-wrap" in response.text
-    assert "@media (max-width: 760px)" in response.text
-    assert "@media (prefers-reduced-motion: reduce)" in response.text
-    assert ":focus-visible" in response.text
-    assert "button:disabled {\n  cursor: not-allowed;" in response.text
+    css = response.text.replace("\r\n", "\n")
+    assert "--brand: #1c6af6" in css
+    assert "--navy: #19213d" in css
+    assert ".latency-panel" in css
+    assert ".latency-table-wrap" in css
+    assert "@media (max-width: 760px)" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    assert ":focus-visible" in css
+    assert "button:disabled {\n  cursor: not-allowed;" in css
 
 
 def test_device_test_script_uses_protected_device_contract_without_persisting_key():
@@ -119,6 +122,7 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'request("/api/device/turn"' in response.text
     assert 'request("/api/device/recording/start"' in response.text
     assert 'request("/api/device/recording/stop"' in response.text
+    assert 'request("/api/device/recording/replay"' in response.text
     assert 'request("/api/device/state"' in response.text
     assert 'request("/api/device/metrics")' in response.text
     assert 'request(payload.audio_url' in response.text
@@ -145,10 +149,17 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'if (error.message === "设备凭证无效") stopPolling()' in response.text
     assert 'currentPhase === "recording"' in response.text
     assert 'localRecordLabel.textContent = "结束并提交"' in response.text
+    assert "snapshot.has_last_recording" in response.text
+    assert 'replayRecordingLabel.textContent = "正在播放录音"' in response.text
+    assert "URL.createObjectURL(recording" not in response.text
     assert 'inputMode === "microphone" && currentPhase === "speaking"' in response.text
     assert 'audioHint.textContent = "正在由树莓派扬声器播放"' in response.text
-    assert 'const NO_SPEECH_MESSAGE = "未识别到有效语音，请重试"' in response.text
+    assert (
+        'const NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。"'
+        in response.text
+    )
     assert 'phase.textContent = "未检测到语音"' in response.text
+    assert '422: "没有听清您的声音，请靠近麦克风后再试一次。"' in response.text
 
 
 def test_index_uses_local_xzinfra_brand_assets():
