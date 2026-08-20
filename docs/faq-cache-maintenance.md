@@ -15,7 +15,7 @@
 - `version`：答案或语音配置变化时递增，用于缓存失效。
 - `aliases`：用户可能说出的完整问题。匹配时应先去除标点、空格并统一英文大小写，再做精确匹配。
 - `answer`：人工审核后的固定讲解内容。
-- `audio_file`：预生成 WAV 文件路径。本阶段只保留该字段，不读取文件，也不检查文件是否存在。
+- `audio_file`：预生成 WAV 文件路径。路径相对于 `config/faq_cache.yaml` 所在目录，必须使用正斜杠 `/`、位于目录内且为 `.wav` 文件；工具会写入同目录下的 `prepared_audio/manifest.json`。
 
 ## 日常维护流程
 
@@ -46,9 +46,22 @@
 
 规则词也会执行空白、标点、大小写和全角半角标准化，但只对配置的主题词、意图词和排除词做包含判断，不对完整问题做宽泛匹配。新规则应先针对单个条目试点，并同时测试正例和负例。
 
-## 音频生成
+## 预生成语音
 
-本阶段只审核 `answer` 并继续调用在线 TTS，服务不会生成或读取 WAV，也不会使用 `audio_file`。后续语音缓存阶段再使用与生产环境相同的 TTS 模型、音色、语速和音频格式批量生成 `prepared_audio/*.wav`，并通过现有受保护的音频接口返回，不能直接暴露本地文件路径。
+第三阶段工具使用项目现有 Settings 和 TTS 配置生成合法、未压缩的 WAV；本阶段不会把 WAV 接入在线问答返回链路。
+
+在仓库根目录的 PowerShell 中执行：
+
+```powershell
+python -m showroom_guide.faq_audio --env-file .env --priority high
+python -m showroom_guide.faq_audio --env-file .env --entry eight_workshops_overview
+python -m showroom_guide.faq_audio --env-file .env --priority high --dry-run
+python -m showroom_guide.faq_audio --env-file .env --priority all --verify-only
+```
+
+`--dry-run` 只显示需要生成或跳过的条目，不调用 TTS、不写 WAV；默认只处理启用的 `high` 条目，`--priority medium` 或 `all` 可选择其他优先级。`--entry` 可重复使用，并只处理指定 ID。`--verify-only` 只检查现有 WAV 和 manifest，不能与 `--dry-run` 或 `--force` 同时使用。修改 `answer`、`version`、`audio_file` 或 TTS 的 model、voice、speed 后，manifest 会将条目标记为 stale；`--force` 可强制重新生成。
+
+工具先把 TTS 结果写入目标目录中的临时文件，并读取声明的全部 PCM 帧校验实际字节数，再提交 WAV 和 manifest。覆盖前会保留同目录备份；两者都成功后才删除备份，提交失败会回滚 WAV 和 manifest。manifest 同时记录完整 WAV 的 `wav_sha256`，内容变化会被标记为 stale。单条失败不会覆盖已有有效 WAV，会继续处理后续条目并以非零状态结束。不要把测试生成的 WAV 或 manifest 提交到仓库。
 
 ## 上线顺序
 

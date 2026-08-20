@@ -69,7 +69,7 @@ class CacheMatchRules(BaseModel):
 class CacheEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    id: str
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
     title: str
     enabled: bool
     priority: CachePriority
