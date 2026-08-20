@@ -11,10 +11,12 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceTurnResult,
     InvalidDeviceAudio,
+    NO_SPEECH_MESSAGE,
     NoSpeechDetected,
 )
 from showroom_guide.main import create_app
 from showroom_guide.local_audio import LocalAudioError
+from showroom_guide.local_device import LastRecordingNotFound
 from showroom_guide.models import GuidePhase, GuideSnapshot
 from showroom_guide.sessions import SessionManager
 
@@ -69,6 +71,8 @@ class FakeRuntime:
         self.local_device.stop_recording = AsyncMock()
         self.local_device.process_upload = AsyncMock()
         self.local_device.reset = AsyncMock()
+        self.local_device.replay_last_recording = AsyncMock()
+        self.local_device.has_last_recording = False
         self.device_api_key = SecretStr(DEVICE_KEY)
         self.device_max_upload_bytes = 1024
         self.cleanup_seconds = 60.0
@@ -87,6 +91,7 @@ def authorized_headers() -> dict[str, str]:
         ("post", "/api/device/turn", {"files": {"file": ("q.wav", make_wav())}}),
         ("post", "/api/device/recording/start", {}),
         ("post", "/api/device/recording/stop", {}),
+        ("post", "/api/device/recording/replay", {}),
         ("get", "/api/device/audio/audio-id", {}),
         ("post", "/api/device/playback-finished", {}),
         ("post", "/api/device/reset", {}),
@@ -105,6 +110,7 @@ def test_device_routes_require_the_same_valid_key(method, path, kwargs, provided
 
 def test_device_state_returns_snapshot():
     runtime = FakeRuntime()
+    runtime.local_device.has_last_recording = True
     runtime.device.snapshot = GuideSnapshot(
         phase=GuidePhase.TRANSCRIBING,
         transcript="问题",
@@ -116,6 +122,7 @@ def test_device_state_returns_snapshot():
     assert response.status_code == 200
     assert response.json()["phase"] == "transcribing"
     assert response.json()["transcript"] == "问题"
+    assert response.json()["has_last_recording"] is True
 
 
 def test_device_metrics_returns_protected_read_only_snapshot():
@@ -203,7 +210,7 @@ def test_device_turn_rejects_oversized_upload_before_processing():
     [
         (InvalidDeviceAudio("WAV 参数错误"), 415, "WAV 参数错误"),
         (QuestionInProgress(), 409, "已有设备问题正在处理中"),
-        (NoSpeechDetected(), 422, "未识别到有效语音，请重试"),
+        (NoSpeechDetected(NO_SPEECH_MESSAGE), 422, NO_SPEECH_MESSAGE),
         (DeviceTranscriptionUnavailable(), 503, "语音识别暂时不可用，请稍后重试"),
         (GuideServiceUnavailable("xzkb"), 503, "知识库暂时不可用，请稍后重试"),
         (GuideServiceUnavailable("capacity"), 503, "当前使用人数较多，请稍后重试"),
@@ -276,9 +283,9 @@ def test_local_recording_start_and_stop_return_device_state_and_turn():
         ),
         (
             "/api/device/recording/stop",
-            NoSpeechDetected(),
+            NoSpeechDetected(NO_SPEECH_MESSAGE),
             422,
-            "未识别到有效语音，请重试",
+            NO_SPEECH_MESSAGE,
         ),
     ],
 )
@@ -295,6 +302,39 @@ def test_local_recording_maps_domain_errors(path, error, status, detail):
 
     assert response.status_code == status
     assert response.json()["detail"] == detail
+
+
+def test_replay_last_recording_returns_no_content():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/recording/replay",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 204
+    runtime.local_device.replay_last_recording.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (LastRecordingNotFound("没有可播放的录音"), 404, "没有可播放的录音"),
+        (QuestionInProgress(), 409, "设备正在使用，暂时不能播放录音"),
+        (LocalAudioError("扬声器播放失败"), 503, "扬声器播放失败"),
+    ],
+)
+def test_replay_last_recording_maps_domain_errors(error, status, detail):
+    runtime = FakeRuntime()
+    runtime.local_device.replay_last_recording.side_effect = error
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/recording/replay",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == status
+    assert response.json() == {"detail": detail}
 
 
 def test_device_audio_download_is_protected_and_not_cached():

@@ -1,6 +1,8 @@
 import asyncio
 import io
 import logging
+import math
+import struct
 import wave
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -11,6 +13,8 @@ from showroom_guide.device import (
     DeviceTurnResult,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    NO_SPEECH_MESSAGE,
+    NoSpeechDetected,
     validate_wav,
 )
 from showroom_guide.local_audio import (
@@ -22,6 +26,10 @@ from showroom_guide.models import GuidePhase, GuideSnapshot
 
 
 logger = logging.getLogger(__name__)
+
+
+class LastRecordingNotFound(RuntimeError):
+    pass
 
 
 class LocalDeviceMode(StrEnum):
@@ -40,20 +48,27 @@ class LocalDeviceWorkflow:
         audio: LocalAudioController,
         max_recording_seconds: float = 60.0,
         min_recording_seconds: float = 0.5,
+        min_recording_dbfs: float = -45.0,
     ) -> None:
         self._session = session
         self._audio = audio
         self._max_recording_seconds = max_recording_seconds
         self._min_recording_seconds = min_recording_seconds
+        self._min_recording_dbfs = min_recording_dbfs
         self._mode = LocalDeviceMode.IDLE
         self._lifecycle_lock = asyncio.Lock()
         self._timeout_task: asyncio.Task[None] | None = None
         self._playback_task: asyncio.Task[None] | None = None
         self._cue_task: asyncio.Task[None] | None = None
+        self._last_recording: bytes | None = None
 
     @property
     def is_recording(self) -> bool:
         return self._mode is LocalDeviceMode.RECORDING
+
+    @property
+    def has_last_recording(self) -> bool:
+        return self._last_recording is not None
 
     async def start_recording(self) -> GuideSnapshot:
         async with self._lifecycle_lock:
@@ -65,6 +80,7 @@ class LocalDeviceWorkflow:
                     "start",
                 )
                 await self._audio.start_recording()
+                self._last_recording = None
                 await self._session.begin_recording()
             except BaseException:
                 await self._audio.abort_recording()
@@ -78,6 +94,21 @@ class LocalDeviceWorkflow:
 
     async def stop_recording(self) -> DeviceTurnResult:
         return await self._complete_recording()
+
+    async def replay_last_recording(self) -> None:
+        async with self._lifecycle_lock:
+            self._ensure_can_start()
+            if self._last_recording is None:
+                raise LastRecordingNotFound("没有可播放的录音")
+            recording = self._last_recording
+            self._mode = LocalDeviceMode.PLAYING
+
+        try:
+            await self._audio.play(recording)
+        finally:
+            async with self._lifecycle_lock:
+                if self._mode is LocalDeviceMode.PLAYING:
+                    self._mode = LocalDeviceMode.IDLE
 
     async def process_upload(self, audio: bytes) -> DeviceTurnResult:
         async with self._lifecycle_lock:
@@ -115,6 +146,7 @@ class LocalDeviceWorkflow:
             await self._session.reset()
         finally:
             async with self._lifecycle_lock:
+                self._last_recording = None
                 self._mode = LocalDeviceMode.IDLE
 
     async def aclose(self) -> None:
@@ -135,6 +167,7 @@ class LocalDeviceWorkflow:
         await self._cancel_task(cue_task)
         await self._session.clear()
         async with self._lifecycle_lock:
+            self._last_recording = None
             self._mode = LocalDeviceMode.IDLE
 
     async def _complete_recording(self) -> DeviceTurnResult:
@@ -157,8 +190,21 @@ class LocalDeviceWorkflow:
                 self._audio.play_stop_cue,
                 "stop",
             )
-            if self._wav_duration_seconds(captured) < self._min_recording_seconds:
-                raise InvalidDeviceAudio("录音时间过短，请重新录音")
+            duration_seconds = self._wav_duration_seconds(captured)
+            self._last_recording = captured
+            if duration_seconds < self._min_recording_seconds:
+                raise InvalidDeviceAudio(
+                    "录音时间太短，请听到开始提示音后再说话。"
+                )
+            if self._wav_dbfs(captured) < self._min_recording_dbfs:
+                raise NoSpeechDetected(NO_SPEECH_MESSAGE)
+        except NoSpeechDetected as error:
+            await self._wait_for_cue(cue_task)
+            await self._session.fail_recording(str(error))
+            await self._play_no_speech_prompt_safely()
+            async with self._lifecycle_lock:
+                self._mode = LocalDeviceMode.IDLE
+            raise
         except (InvalidDeviceAudio, LocalAudioError) as error:
             await self._wait_for_cue(cue_task)
             await self._session.fail_recording(str(error))
@@ -168,6 +214,12 @@ class LocalDeviceWorkflow:
 
         try:
             result = await self._session.process_recorded_wav(captured)
+        except NoSpeechDetected:
+            await self._wait_for_cue(cue_task)
+            await self._play_no_speech_prompt_safely()
+            async with self._lifecycle_lock:
+                self._mode = LocalDeviceMode.IDLE
+            raise
         except BaseException:
             await self._wait_for_cue(cue_task)
             async with self._lifecycle_lock:
@@ -268,6 +320,15 @@ class LocalDeviceWorkflow:
                 exc_info=True,
             )
 
+    async def _play_no_speech_prompt_safely(self) -> None:
+        try:
+            await self._audio.play_no_speech_prompt()
+        except Exception:
+            logger.warning(
+                "local_no_speech_prompt_failed",
+                exc_info=True,
+            )
+
     @staticmethod
     async def _cancel_task(task: asyncio.Task[None] | None) -> None:
         if task is None or task is asyncio.current_task():
@@ -281,3 +342,19 @@ class LocalDeviceWorkflow:
         validate_wav(audio)
         with wave.open(io.BytesIO(audio), "rb") as source:
             return source.getnframes() / source.getframerate()
+
+    @staticmethod
+    def _wav_dbfs(audio: bytes) -> float:
+        with wave.open(io.BytesIO(audio), "rb") as source:
+            frames = source.readframes(source.getnframes())
+        sample_count = len(frames) // 2
+        if sample_count == 0:
+            return -math.inf
+        square_sum = sum(
+            sample * sample
+            for (sample,) in struct.iter_unpack("<h", frames)
+        )
+        rms = math.sqrt(square_sum / sample_count)
+        if rms == 0:
+            return -math.inf
+        return 20 * math.log10(rms / 32768)

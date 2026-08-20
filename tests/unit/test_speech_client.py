@@ -50,6 +50,19 @@ async def test_asr_server_failure_is_propagated():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_asr_empty_text_is_returned_for_session_classification():
+    respx.post("http://models.test/audio/transcriptions").mock(
+        return_value=httpx.Response(200, json={"text": "   "})
+    )
+
+    async with make_client() as client:
+        text = await client.transcribe(io.BytesIO(b"RIFF-audio"))
+
+    assert text == ""
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_tts_requests_wav():
     wav = b"RIFF\x04\x00\x00\x00WAVE"
     route = respx.post("http://models.test/audio/speech").mock(

@@ -6,6 +6,8 @@ const microphoneInput = document.querySelector("#microphone-input");
 const wavInput = document.querySelector("#wav-input");
 const localRecord = document.querySelector("#local-record");
 const localRecordLabel = document.querySelector("#local-record-label");
+const replayRecording = document.querySelector("#replay-recording");
+const replayRecordingLabel = document.querySelector("#replay-recording-label");
 const wavFile = document.querySelector("#wav-file");
 const dropZone = document.querySelector("#drop-zone");
 const fileName = document.querySelector("#file-name");
@@ -43,7 +45,7 @@ const phaseLabels = {
   degraded: "服务降级",
   error: "出现错误",
 };
-const NO_SPEECH_MESSAGE = "未识别到有效语音，请重试";
+const NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。";
 
 let audioObjectUrl = null;
 let pollTimer = null;
@@ -53,6 +55,8 @@ let operationPending = false;
 let currentPhase = "idle";
 let inputMode = "microphone";
 let localPlaybackActive = false;
+let hasLastRecording = false;
+let replayPending = false;
 
 const outcomeLabels = {
   success: "成功",
@@ -92,9 +96,11 @@ function requireKey() {
 async function responseError(response) {
   const messages = {
     401: "设备凭证无效",
+    404: "没有可播放的录音",
     409: "设备正在处理上一轮，请稍后重试或重置",
     413: "WAV 文件超过服务端限制",
     415: "音频不是 16 kHz、单声道、16-bit PCM WAV",
+    422: "没有听清您的声音，请靠近麦克风后再试一次。",
     503: "语音或知识库服务暂时不可用",
   };
   let detail = "";
@@ -127,6 +133,7 @@ function clearError() {
 
 function renderState(snapshot) {
   currentPhase = snapshot.phase || "idle";
+  hasLastRecording = Boolean(snapshot.has_last_recording);
   phasePill.dataset.phase = currentPhase;
   phase.textContent = phaseLabels[currentPhase] || "处理中";
   if (currentPhase === "error" && snapshot.message === NO_SPEECH_MESSAGE) {
@@ -179,6 +186,7 @@ function setOperationPending(pending) {
 function updateLocalRecordControl() {
   const keyReady = Boolean(deviceKey.value.trim());
   const processing = ["transcribing", "thinking", "speaking"].includes(currentPhase);
+  const busy = currentPhase === "recording" || processing;
   for (const button of modeButtons) {
     button.disabled = operationPending || currentPhase === "recording" || processing;
   }
@@ -190,6 +198,18 @@ function updateLocalRecordControl() {
     localRecordLabel.textContent = "结束并提交";
   } else {
     localRecordLabel.textContent = "开始录音";
+  }
+  replayRecording.disabled = (
+    operationPending
+    || replayPending
+    || busy
+    || !keyReady
+    || !hasLastRecording
+  );
+  if (replayPending) {
+    replayRecordingLabel.textContent = "正在播放录音";
+  } else {
+    replayRecordingLabel.textContent = "播放刚才的录音";
   }
 }
 
@@ -494,6 +514,26 @@ localRecord.addEventListener("click", async () => {
   }
 });
 
+replayRecording.addEventListener("click", async () => {
+  clearError();
+  try {
+    requireKey();
+    replayPending = true;
+    setOperationPending(true);
+    updateLocalRecordControl();
+    statusMessage.textContent = "正在由树莓派扬声器播放刚才的录音";
+    await request("/api/device/recording/replay", { method: "POST" });
+    statusMessage.textContent = "录音播放完成";
+  } catch (error) {
+    showError(error);
+  } finally {
+    replayPending = false;
+    setOperationPending(false);
+    await refreshState({ showFailure: false });
+    startPolling();
+  }
+});
+
 deviceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearError();
@@ -531,6 +571,7 @@ resetDevice.addEventListener("click", async () => {
     setOperationPending(true);
     await request("/api/device/reset", { method: "POST" });
     clearResult();
+    hasLastRecording = false;
     localPlaybackActive = false;
     currentPhase = "idle";
     phasePill.dataset.phase = "idle";

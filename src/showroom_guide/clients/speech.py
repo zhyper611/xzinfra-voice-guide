@@ -43,10 +43,7 @@ class SpeechClient:
             data={"model": self._asr_model},
         )
         response.raise_for_status()
-        text = response.json().get("text", "").strip()
-        if not text:
-            raise ValueError("ASR returned an empty transcription")
-        return text
+        return response.json().get("text", "").strip()
 
     async def synthesize(self, text: str) -> bytes:
         response = await self._client.post(

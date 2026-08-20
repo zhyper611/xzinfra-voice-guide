@@ -32,4 +32,10 @@ filterwarnings = [
 ]
 
 [tool.setuptools.package-data]
-showroom_guide = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]
+showroom_guide = [
+  "assets/*.wav",
+  "web/*.html",
+  "web/*.css",
+  "web/*.js",
+  "web/*.svg",
+]
