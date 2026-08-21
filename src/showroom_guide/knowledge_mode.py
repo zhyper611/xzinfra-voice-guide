@@ -4,7 +4,7 @@ import logging
 import math
 import struct
 import wave
-from contextlib import suppress
+from dataclasses import dataclass
 from enum import StrEnum
 
 from showroom_guide.device import (
@@ -13,6 +13,12 @@ from showroom_guide.device import (
     NoSpeechDetected,
     validate_wav,
 )
+from showroom_guide.knowledge_capture import (
+    KnowledgeAsrUnavailable,
+    KnowledgeTtsUnavailable,
+)
+from showroom_guide.knowledge_outbox import KnowledgeEntry
+from showroom_guide.local_audio import LocalAudioError
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +30,18 @@ class KnowledgeModeState(StrEnum):
     RECORDING = "recording"
     PROCESSING = "processing"
     CONFIRMING = "confirming"
+
+
+class KnowledgeProcessingStage(StrEnum):
+    TRANSCRIBING = "transcribing"
+    SYNTHESIZING = "synthesizing"
+    PLAYING_REVIEW = "playing_review"
+
+
+@dataclass(frozen=True)
+class KnowledgeLongPressResult:
+    exited: bool
+    saved_entry: KnowledgeEntry | None
 
 
 class KnowledgeModeWorkflow:
@@ -44,10 +62,19 @@ class KnowledgeModeWorkflow:
         self._state = KnowledgeModeState.INACTIVE
         self._operation_lock = asyncio.Lock()
         self._timeout_task: asyncio.Task[None] | None = None
+        self._processing_stage: KnowledgeProcessingStage | None = None
 
     @property
     def state(self) -> KnowledgeModeState:
         return self._state
+
+    @property
+    def processing_stage(self) -> KnowledgeProcessingStage | None:
+        return self._processing_stage
+
+    @property
+    def draft_text(self) -> str | None:
+        return self._capture.draft_text
 
     async def enter(self) -> None:
         async with self._operation_lock:
@@ -68,34 +95,48 @@ class KnowledgeModeWorkflow:
             if self._state is KnowledgeModeState.RECORDING:
                 await self._finish_recording()
 
-    async def long_press(self) -> bool:
+    async def long_press(self) -> KnowledgeLongPressResult:
         async with self._operation_lock:
             if self._state is KnowledgeModeState.READY and not self._capture.has_draft:
                 self._capture.clear()
                 self._state = KnowledgeModeState.INACTIVE
                 await self._play_cue_safely(self._audio.play_stop_cue)
-                return True
+                return KnowledgeLongPressResult(exited=True, saved_entry=None)
             if (
                 self._state is KnowledgeModeState.CONFIRMING
                 and self._capture.has_draft
             ):
-                self._capture.save()
+                entry = self._capture.save()
                 self._state = KnowledgeModeState.INACTIVE
                 await self._play_named_prompt_safely("knowledge-saved")
-                return True
-            return False
+                return KnowledgeLongPressResult(exited=True, saved_entry=entry)
+            return KnowledgeLongPressResult(exited=False, saved_entry=None)
+
+    async def cancel(self) -> None:
+        caller_cancellation = None
+        timeout_task = self._take_timeout_task()
+        if timeout_task is not None and timeout_task is not asyncio.current_task():
+            timeout_task.cancel()
+            try:
+                await timeout_task
+            except asyncio.CancelledError as error:
+                if asyncio.current_task().cancelling():
+                    caller_cancellation = error
+        try:
+            async with self._operation_lock:
+                try:
+                    if self._state is KnowledgeModeState.RECORDING:
+                        await self._audio.abort_recording()
+                finally:
+                    self._capture.clear()
+                    self._processing_stage = None
+                    self._state = KnowledgeModeState.INACTIVE
+        finally:
+            if caller_cancellation is not None:
+                raise caller_cancellation
 
     async def aclose(self) -> None:
-        timeout_task = self._take_timeout_task()
-        if timeout_task is not None:
-            timeout_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await timeout_task
-        async with self._operation_lock:
-            if self._state is KnowledgeModeState.RECORDING:
-                await self._audio.abort_recording()
-            self._capture.clear()
-            self._state = KnowledgeModeState.INACTIVE
+        await self.cancel()
 
     async def _start_recording(self) -> None:
         await self._play_cue_safely(self._audio.play_start_cue)
@@ -124,7 +165,11 @@ class KnowledgeModeWorkflow:
                 raise InvalidDeviceAudio("录音时间太短，请重新录入。")
             if self._dbfs(captured) < self._min_recording_dbfs:
                 raise NoSpeechDetected(NO_SPEECH_MESSAGE)
-            draft = await self._capture.review(captured)
+            self._processing_stage = KnowledgeProcessingStage.TRANSCRIBING
+            transcript = await self._capture.transcribe(captured)
+            self._processing_stage = KnowledgeProcessingStage.SYNTHESIZING
+            draft = await self._capture.synthesize_review(transcript)
+            self._processing_stage = KnowledgeProcessingStage.PLAYING_REVIEW
             await self._audio.play(draft.audio)
             self._capture.accept(draft)
             self._state = KnowledgeModeState.CONFIRMING
@@ -135,6 +180,18 @@ class KnowledgeModeWorkflow:
         except InvalidDeviceAudio:
             self._state = fallback
             raise
+        except KnowledgeAsrUnavailable:
+            self._state = fallback
+            await self._play_named_prompt_safely("asr-unavailable")
+            raise
+        except KnowledgeTtsUnavailable:
+            self._state = fallback
+            await self._play_named_prompt_safely("tts-unavailable")
+            raise
+        except LocalAudioError:
+            self._state = fallback
+            await self._play_named_prompt_safely("guide-unavailable")
+            raise
         except Exception:
             self._state = fallback
             await self._play_named_prompt_safely("guide-unavailable")
@@ -142,6 +199,8 @@ class KnowledgeModeWorkflow:
         except BaseException:
             self._state = fallback
             raise
+        finally:
+            self._processing_stage = None
 
     async def _stop_after_timeout(self) -> None:
         try:

@@ -17,7 +17,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from starlette.concurrency import run_in_threadpool
@@ -60,9 +60,21 @@ from showroom_guide.faq_admin import (
 )
 from showroom_guide.gpio_button import GpioButtonService
 from showroom_guide.knowledge_capture import KnowledgeCaptureSession
-from showroom_guide.knowledge_mode import KnowledgeModeWorkflow
+from showroom_guide.knowledge_mode import (
+    KnowledgeModeState,
+    KnowledgeModeWorkflow,
+    KnowledgeProcessingStage,
+)
 from showroom_guide.knowledge_outbox import KnowledgeOutbox
 from showroom_guide.knowledge_sync import KnowledgeSyncService
+from showroom_guide.knowledge_web import (
+    KnowledgeControlState,
+    KnowledgeEntrySnapshot,
+    KnowledgeSyncState,
+    KnowledgeWebController,
+    KnowledgeWebError,
+    KnowledgeWebState,
+)
 from showroom_guide.local_audio import LocalAudioController, LocalAudioError
 from showroom_guide.local_device import (
     LastRecordingNotFound,
@@ -121,6 +133,36 @@ class DeviceStateResponse(GuideSnapshot):
     has_last_recording: bool
 
 
+class KnowledgeStateResponse(BaseModel):
+    enabled: bool
+    mode_state: KnowledgeModeState
+    processing_stage: KnowledgeProcessingStage | None
+    control_state: KnowledgeControlState
+    lease_expires_at: float | None
+    draft_text: str | None
+    last_entry_id: str | None
+
+
+class KnowledgeAcquireResponse(BaseModel):
+    lease_token: str
+    knowledge_state: KnowledgeStateResponse
+
+
+class KnowledgeEntryResponse(BaseModel):
+    entry_id: str
+    sync_state: KnowledgeSyncState
+    attempts: int
+    last_error: str | None
+    next_attempt_at: float
+    updated_at: float
+
+
+class KnowledgeErrorResponse(BaseModel):
+    code: str
+    detail: str
+    knowledge_state: KnowledgeStateResponse
+
+
 @dataclass
 class Runtime:
     sessions: SessionManager
@@ -131,6 +173,8 @@ class Runtime:
     xzkb: XzkbClient
     speech: SpeechClient
     cleanup_seconds: float
+    knowledge_outbox: KnowledgeOutbox | None
+    knowledge_web: KnowledgeWebController
     faq_cache: FaqCache | None = None
     prepared_audio: PreparedAudioStore | None = None
     faq_admin_service: FaqCacheReadService | None = None
@@ -141,16 +185,52 @@ class Runtime:
     gpio_button: GpioButtonService | None = None
 
     async def aclose(self) -> None:
+        errors: list[BaseException] = []
+        cleanup_task = asyncio.create_task(
+            self._close_resources(errors),
+            name="runtime-close-cleanup",
+        )
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as error:
+                if not errors:
+                    errors.append(error)
+                if cleanup_task.cancelled():
+                    break
+            except BaseException as error:
+                if not errors:
+                    errors.append(error)
+                break
+        if cleanup_task.done():
+            try:
+                cleanup_task.result()
+            except BaseException as error:
+                if not errors:
+                    errors.append(error)
+        if errors:
+            raise errors[0]
+
+    async def _close_resources(self, errors: list[BaseException]) -> None:
+        async def attempt(operation: Awaitable[None]) -> None:
+            try:
+                await operation
+            except BaseException as error:
+                errors.append(error)
+
         if self.gpio_button is not None:
-            await self.gpio_button.aclose()
+            await attempt(self.gpio_button.aclose())
+        await attempt(self.knowledge_web.aclose())
         if self.knowledge_mode is not None:
-            await self.knowledge_mode.aclose()
-        await self.sessions.clear()
-        await self.local_device.aclose()
+            await attempt(self.knowledge_mode.aclose())
+        await attempt(self.sessions.clear())
+        await attempt(self.local_device.aclose())
         if self.knowledge_sync is not None:
-            await self.knowledge_sync.aclose()
-        await self.xzkb.aclose()
-        await self.speech.aclose()
+            await attempt(self.knowledge_sync.aclose())
+        await attempt(self.xzkb.aclose())
+        await attempt(self.speech.aclose())
+        if errors:
+            raise errors[0]
 
 
 def create_runtime(settings: Settings | None = None) -> Runtime:
@@ -252,6 +332,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         min_recording_dbfs=configured.local_recording_min_dbfs,
     )
     knowledge_mode = None
+    knowledge_outbox = None
     knowledge_sync = None
     if configured.knowledge_capture_enabled:
         knowledge_client = XzkbKnowledgeClient(
@@ -293,6 +374,12 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             hold_seconds=configured.button_hold_seconds,
             workflow=button_workflow,
         )
+    knowledge_web = KnowledgeWebController(
+        button_workflow if knowledge_mode is not None else None,
+        knowledge_mode,
+        knowledge_outbox,
+        lease_seconds=configured.knowledge_web_lease_seconds,
+    )
     return Runtime(
         sessions=sessions,
         device=device,
@@ -301,6 +388,8 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         device_max_upload_bytes=configured.device_max_upload_bytes,
         xzkb=xzkb,
         speech=speech,
+        knowledge_outbox=knowledge_outbox,
+        knowledge_web=knowledge_web,
         faq_cache=faq_cache,
         prepared_audio=prepared_audio,
         faq_admin_service=faq_admin_service,
@@ -350,6 +439,31 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     app = FastAPI(title="展厅 AI 讲解", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+    def knowledge_state_response(
+        state: KnowledgeWebState,
+    ) -> KnowledgeStateResponse:
+        return KnowledgeStateResponse.model_validate(state, from_attributes=True)
+
+    def knowledge_entry_response(
+        entry: KnowledgeEntrySnapshot,
+    ) -> KnowledgeEntryResponse:
+        return KnowledgeEntryResponse.model_validate(entry, from_attributes=True)
+
+    @app.exception_handler(KnowledgeWebError)
+    async def handle_knowledge_web_error(
+        _request: Request,
+        error: KnowledgeWebError,
+    ) -> JSONResponse:
+        payload = KnowledgeErrorResponse(
+            code=error.code,
+            detail=error.detail,
+            knowledge_state=knowledge_state_response(error.state),
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=payload.model_dump(mode="json"),
+        )
 
     @app.get("/healthz", include_in_schema=False)
     async def healthcheck() -> dict[str, str]:
@@ -413,6 +527,25 @@ def create_app(runtime: Runtime) -> FastAPI:
                 detail="FAQ admin key invalid",
                 headers={"Cache-Control": "no-store"},
             )
+
+    def knowledge_lease_header(
+        x_knowledge_lease: str | None = Header(
+            default=None,
+            alias="X-Knowledge-Lease",
+        ),
+    ) -> str | None:
+        return x_knowledge_lease
+
+    async def require_knowledge_lease(lease_token: str | None) -> str:
+        if lease_token is not None:
+            return lease_token
+        state = await runtime.knowledge_web.state()
+        raise KnowledgeWebError(
+            "knowledge_lease_expired",
+            "知识补充控制权已过期",
+            409,
+            state,
+        )
 
     def device_turn_response(result: DeviceTurnResult) -> DeviceTurnResponse:
         audio_url = (
@@ -773,6 +906,74 @@ def create_app(runtime: Runtime) -> FastAPI:
             **runtime.device.snapshot.model_dump(),
             has_last_recording=runtime.local_device.has_last_recording,
         )
+
+    @app.post(
+        "/api/device/knowledge/acquire",
+        response_model=KnowledgeAcquireResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def acquire_knowledge_control() -> KnowledgeAcquireResponse:
+        lease_token, state = await runtime.knowledge_web.acquire()
+        return KnowledgeAcquireResponse(
+            lease_token=lease_token,
+            knowledge_state=knowledge_state_response(state),
+        )
+
+    @app.get(
+        "/api/device/knowledge/state",
+        response_model=KnowledgeStateResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def get_knowledge_state(
+        lease_token: str | None = Depends(knowledge_lease_header),
+    ) -> KnowledgeStateResponse:
+        state = await runtime.knowledge_web.state(lease_token)
+        return knowledge_state_response(state)
+
+    @app.post(
+        "/api/device/knowledge/short-press",
+        response_model=KnowledgeStateResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def short_press_knowledge(
+        lease_token: str | None = Depends(knowledge_lease_header),
+    ) -> KnowledgeStateResponse:
+        token = await require_knowledge_lease(lease_token)
+        state = await runtime.knowledge_web.short_press(token)
+        return knowledge_state_response(state)
+
+    @app.post(
+        "/api/device/knowledge/long-press",
+        response_model=KnowledgeStateResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def long_press_knowledge(
+        lease_token: str | None = Depends(knowledge_lease_header),
+    ) -> KnowledgeStateResponse:
+        token = await require_knowledge_lease(lease_token)
+        state = await runtime.knowledge_web.long_press(token)
+        return knowledge_state_response(state)
+
+    @app.post(
+        "/api/device/knowledge/release",
+        response_model=KnowledgeStateResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def release_knowledge_control(
+        lease_token: str | None = Depends(knowledge_lease_header),
+    ) -> KnowledgeStateResponse:
+        token = await require_knowledge_lease(lease_token)
+        state = await runtime.knowledge_web.release(token)
+        return knowledge_state_response(state)
+
+    @app.get(
+        "/api/device/knowledge/entries/{entry_id}",
+        response_model=KnowledgeEntryResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def get_knowledge_entry(entry_id: str) -> KnowledgeEntryResponse:
+        entry = await runtime.knowledge_web.entry(entry_id)
+        return knowledge_entry_response(entry)
 
     @app.get(
         "/api/device/metrics",

@@ -62,6 +62,7 @@ class Settings(BaseSettings):
         / "knowledge-outbox.sqlite3"
     )
     knowledge_sync_interval_seconds: float = Field(default=30.0, gt=0)
+    knowledge_web_lease_seconds: float = Field(default=120.0, gt=0)
     ptt_pin: int = 17
     stop_pin: int = 27
     volume_up_pin: int = 22

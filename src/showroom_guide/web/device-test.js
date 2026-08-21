@@ -4,6 +4,7 @@ const toggleKey = document.querySelector("#toggle-key");
 const modeButtons = [...document.querySelectorAll("[data-mode]")];
 const microphoneInput = document.querySelector("#microphone-input");
 const wavInput = document.querySelector("#wav-input");
+const knowledgeInput = document.querySelector("#knowledge-input");
 const localRecord = document.querySelector("#local-record");
 const localRecordLabel = document.querySelector("#local-record-label");
 const replayRecording = document.querySelector("#replay-recording");
@@ -35,6 +36,14 @@ const latencyTotal = document.querySelector("#latency-total");
 const latencyFailure = document.querySelector("#latency-failure");
 const latencyStages = document.querySelector("#latency-stages");
 const latencyStatsBody = document.querySelector("#latency-stats-body");
+const knowledgeControlState = document.querySelector("#knowledge-control-state");
+const knowledgeModeState = document.querySelector("#knowledge-mode-state");
+const knowledgeProcessingStage = document.querySelector("#knowledge-processing-stage");
+const knowledgeDraft = document.querySelector("#knowledge-draft");
+const knowledgeSync = document.querySelector("#knowledge-sync");
+const knowledgeSyncState = document.querySelector("#knowledge-sync-state");
+const knowledgeShortPress = document.querySelector("#knowledge-short-press");
+const knowledgeLongPress = document.querySelector("#knowledge-long-press");
 
 const phaseLabels = {
   idle: "待机",
@@ -48,22 +57,75 @@ const phaseLabels = {
 const NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。";
 const REQUEST_TIMEOUT_MS = 180000;
 const STATUS_REQUEST_TIMEOUT_MS = 15000;
+const KNOWLEDGE_LEASE_KEY = "showroom-knowledge-lease";
 
 let audioObjectUrl = null;
 let pollTimer = null;
 let stateRequestPending = false;
+let stateRequestGeneration = null;
+let stateRequestId = 0;
 let metricsRequestPending = false;
+let metricsRequestGeneration = null;
+let metricsRequestId = 0;
 let operationPending = false;
 let currentPhase = "idle";
 let inputMode = "microphone";
 let localPlaybackActive = false;
 let hasLastRecording = false;
 let replayPending = false;
+let knowledgePollTimer = null;
+let knowledgeStateRequestPending = false;
+let knowledgeStateRequestGeneration = null;
+let knowledgeStateRequestId = 0;
+let knowledgeEntryRequestPending = false;
+let knowledgeEntryRequestGeneration = null;
+let knowledgeEntryRequestId = 0;
+let knowledgeOperationPending = false;
+let knowledgeEntryId = null;
+let knowledgeLastEntryId = null;
+let knowledgeSnapshot = null;
+let knowledgeLeaseToken = null;
+let knowledgeOperationNeedsResync = false;
+let deviceKeyGeneration = 0;
+
+try {
+  knowledgeLeaseToken = sessionStorage.getItem(KNOWLEDGE_LEASE_KEY);
+} catch {
+  knowledgeLeaseToken = null;
+}
 
 const outcomeLabels = {
   success: "成功",
   degraded: "降级",
   error: "失败",
+};
+
+const knowledgeControlLabels = {
+  available: "可接管",
+  owned: "本页控制",
+  observed: "只读观察",
+};
+
+const knowledgeModeLabels = {
+  inactive: "未进入",
+  ready: "准备录入",
+  recording: "正在录音",
+  processing: "处理中",
+  confirming: "等待确认",
+};
+
+const knowledgeStageLabels = {
+  transcribing: "ASR 识别",
+  synthesizing: "TTS 合成",
+  playing_review: "复述播放",
+};
+
+const knowledgeSyncLabels = {
+  local_saved: "已保存到本机",
+  uploading: "正在上传",
+  processing: "知识库处理中",
+  retrying: "同步重试中",
+  synced: "已同步",
 };
 
 const metricLabels = [
@@ -95,6 +157,10 @@ function requireKey() {
   return key;
 }
 
+function isCurrentDeviceKeyRequest(generation, key) {
+  return generation === deviceKeyGeneration && key === deviceKey.value.trim();
+}
+
 async function responseError(response) {
   const messages = {
     401: "设备凭证无效",
@@ -114,10 +180,11 @@ async function responseError(response) {
   return new Error(detail || messages[response.status] || `请求失败（${response.status}）`);
 }
 
-async function request(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  requireKey();
+async function request(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS, requestKey = null) {
+  const key = requestKey === null ? requireKey() : requestKey;
+  if (!key) throw new Error("请输入设备密钥");
   const headers = new Headers(options.headers || {});
-  headers.set("X-Device-Key", deviceKey.value.trim());
+  headers.set("X-Device-Key", key);
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -138,6 +205,68 @@ async function request(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   }
 }
 
+async function knowledgeResponseError(response) {
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+  const error = new Error(payload.detail || `知识补充请求失败（${response.status}）`);
+  error.code = payload.code;
+  error.payload = payload;
+  return error;
+}
+
+async function knowledgeRequest(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS, requestKey = null) {
+  const key = requestKey === null ? requireKey() : requestKey;
+  if (!key) throw new Error("请输入设备密钥");
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Device-Key", key);
+  if (knowledgeLeaseToken) {
+    headers.set("X-Knowledge-Lease", knowledgeLeaseToken);
+  }
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok) throw await knowledgeResponseError(response);
+    return await response.json();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("知识补充操作超时，正在校准设备状态");
+      timeoutError.code = "knowledge_timeout";
+      timeoutError.payload = null;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function persistKnowledgeLease(token) {
+  knowledgeLeaseToken = token;
+  try {
+    sessionStorage.setItem(KNOWLEDGE_LEASE_KEY, knowledgeLeaseToken);
+  } catch {
+    knowledgeLeaseToken = token;
+  }
+}
+
+function clearKnowledgeLease() {
+  knowledgeLeaseToken = null;
+  try {
+    sessionStorage.removeItem(KNOWLEDGE_LEASE_KEY);
+  } catch {
+    knowledgeLeaseToken = null;
+  }
+}
+
 function showError(error) {
   deviceError.textContent = error instanceof TypeError
     ? "无法连接展厅服务，请检查网络或服务状态"
@@ -146,6 +275,91 @@ function showError(error) {
 
 function clearError() {
   deviceError.textContent = "";
+}
+
+function showKnowledgeError(error) {
+  deviceError.textContent = error instanceof TypeError
+    ? "无法连接展厅服务，请检查网络或服务状态"
+    : error.message || "知识补充请求失败，请稍后重试";
+}
+
+function updateKnowledgeControls() {
+  const snapshot = knowledgeSnapshot;
+  const keyReady = Boolean(deviceKey.value.trim());
+  const enabled = snapshot ? snapshot.enabled !== false : false;
+  const owned = snapshot && snapshot.control_state === "owned" && Boolean(knowledgeLeaseToken);
+  const observed = snapshot && snapshot.control_state === "observed";
+  const mode = snapshot ? snapshot.mode_state : "inactive";
+
+  knowledgeShortPress.textContent = "开始录入";
+  knowledgeLongPress.textContent = "进入知识补充";
+  knowledgeShortPress.disabled = true;
+  knowledgeLongPress.disabled = true;
+
+  if (!keyReady || !enabled || observed || knowledgeOperationPending) return;
+  if (!owned) {
+    knowledgeLongPress.disabled = false;
+    return;
+  }
+
+  if (mode === "ready") {
+    knowledgeShortPress.disabled = false;
+    knowledgeLongPress.disabled = false;
+    knowledgeLongPress.textContent = "退出知识模式";
+  } else if (mode === "recording") {
+    knowledgeShortPress.disabled = false;
+    knowledgeShortPress.textContent = "停止并复述";
+    knowledgeLongPress.textContent = "复述准备中";
+  } else if (mode === "processing") {
+    knowledgeShortPress.textContent = "处理中";
+    knowledgeLongPress.textContent = "处理中";
+  } else if (mode === "confirming") {
+    knowledgeShortPress.disabled = false;
+    knowledgeLongPress.disabled = false;
+    knowledgeShortPress.textContent = "重新录入";
+    knowledgeLongPress.textContent = "保存并返回";
+  }
+}
+
+function renderKnowledgeState(snapshot, { captureEntry = false } = {}) {
+  knowledgeSnapshot = snapshot;
+  const owned = snapshot.control_state === "owned" && Boolean(knowledgeLeaseToken);
+  knowledgeControlState.textContent = knowledgeControlLabels[snapshot.control_state] || "待校准";
+  knowledgeModeState.textContent = knowledgeModeLabels[snapshot.mode_state] || "未知";
+  knowledgeProcessingStage.textContent = knowledgeStageLabels[snapshot.processing_stage] || "--";
+  knowledgeDraft.textContent = owned && snapshot.draft_text
+    ? snapshot.draft_text
+    : "等待录入";
+
+  if (snapshot.last_entry_id) {
+    const isNewEntry = snapshot.last_entry_id !== knowledgeLastEntryId;
+    knowledgeLastEntryId = snapshot.last_entry_id;
+    if (captureEntry && isNewEntry) {
+      knowledgeEntryId = snapshot.last_entry_id;
+      clearKnowledgeLease();
+    }
+  }
+  updateKnowledgeControls();
+  updateLocalRecordControl();
+}
+
+function renderKnowledgeEntry(entry) {
+  const syncState = entry.sync_state || "local_saved";
+  knowledgeSync.dataset.syncState = syncState;
+  const baseLabel = knowledgeSyncLabels[syncState] || "同步状态未知";
+  knowledgeSyncState.textContent = syncState === "retrying" && entry.last_error
+    ? `${baseLabel}：${entry.last_error}`
+    : baseLabel;
+  if (entry.sync_state === "synced") knowledgeEntryId = null;
+  if (entry.sync_state === "retrying") knowledgeEntryId = entry.entry_id;
+}
+
+function handleKnowledgeError(error, { showFailure = true, captureEntry = false } = {}) {
+  if (error.code === "knowledge_lease_expired") clearKnowledgeLease();
+  const errorState = error.payload && error.payload.knowledge_state;
+  if (errorState) renderKnowledgeState(errorState, { captureEntry });
+  if (error.message === "设备凭证无效") stopAllPolling();
+  if (showFailure) showKnowledgeError(error);
 }
 
 function renderState(snapshot) {
@@ -198,17 +412,39 @@ function setOperationPending(pending) {
   resetDevice.disabled = pending;
   runTestLabel.textContent = pending ? "正在处理" : "开始测试";
   updateLocalRecordControl();
+  updateKnowledgeControls();
 }
 
 function updateLocalRecordControl() {
   const keyReady = Boolean(deviceKey.value.trim());
   const processing = ["transcribing", "thinking", "speaking"].includes(currentPhase);
   const busy = currentPhase === "recording" || processing;
+  const knowledgeModeActive = (
+    knowledgeSnapshot
+    && knowledgeSnapshot.mode_state !== "inactive"
+  );
+  const standardControlsBlocked = Boolean(knowledgeModeActive || knowledgeOperationPending);
+  const knowledgeModeBusy = knowledgeSnapshot && (
+    knowledgeSnapshot.mode_state === "recording"
+    || knowledgeSnapshot.mode_state === "processing"
+  );
   for (const button of modeButtons) {
-    button.disabled = operationPending || currentPhase === "recording" || processing;
+    button.disabled = (
+      operationPending
+      || knowledgeOperationPending
+      || currentPhase === "recording"
+      || processing
+      || (
+        knowledgeModeBusy
+        && button.dataset.mode !== "knowledge"
+        && button.dataset.mode !== inputMode
+      )
+    );
   }
+  runTest.disabled = operationPending || standardControlsBlocked;
+  resetDevice.disabled = operationPending || standardControlsBlocked;
   localRecord.dataset.recording = String(currentPhase === "recording");
-  localRecord.disabled = operationPending || processing || !keyReady;
+  localRecord.disabled = operationPending || processing || !keyReady || standardControlsBlocked;
   if (operationPending) {
     localRecordLabel.textContent = "正在处理";
   } else if (currentPhase === "recording") {
@@ -222,6 +458,7 @@ function updateLocalRecordControl() {
     || busy
     || !keyReady
     || !hasLastRecording
+    || standardControlsBlocked
   );
   if (replayPending) {
     replayRecordingLabel.textContent = "正在播放录音";
@@ -234,8 +471,14 @@ function showInputMode(mode) {
   inputMode = mode;
   microphoneInput.hidden = mode !== "microphone";
   wavInput.hidden = mode !== "wav";
+  knowledgeInput.hidden = mode !== "knowledge";
   for (const button of modeButtons) {
-    button.setAttribute("aria-selected", String(button.dataset.mode === mode));
+    const selected = button.dataset.mode === mode;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = button.dataset.mode === mode ? 0 : -1;
+  }
+  if (mode === "knowledge" && deviceKey.value.trim()) {
+    refreshKnowledgeState({ showFailure: true });
   }
 }
 
@@ -260,16 +503,30 @@ async function renderTurnResult(payload, { localPlayback = false } = {}) {
 }
 
 async function refreshState({ showFailure = false } = {}) {
-  if (!deviceKey.value.trim() || stateRequestPending || document.hidden) return;
+  const requestGeneration = deviceKeyGeneration;
+  const requestKey = deviceKey.value.trim();
+  if (
+    !requestKey
+    || (stateRequestPending && stateRequestGeneration === requestGeneration)
+    || document.hidden
+  ) return;
+  const requestId = ++stateRequestId;
   stateRequestPending = true;
+  stateRequestGeneration = requestGeneration;
   try {
-    const response = await request("/api/device/state", {}, STATUS_REQUEST_TIMEOUT_MS);
-    renderState(await response.json());
+    const response = await request("/api/device/state", {}, STATUS_REQUEST_TIMEOUT_MS, requestKey);
+    const snapshot = await response.json();
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
+    renderState(snapshot);
   } catch (error) {
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
     if (error.message === "设备凭证无效") stopPolling();
     if (showFailure || error.message === "设备凭证无效") showError(error);
   } finally {
-    stateRequestPending = false;
+    if (requestId === stateRequestId) {
+      stateRequestPending = false;
+      stateRequestGeneration = null;
+    }
   }
 }
 
@@ -285,6 +542,139 @@ function startPolling() {
   if (!deviceKey.value.trim() || document.hidden) return;
   refreshState({ showFailure: true });
   pollTimer = window.setInterval(refreshState, 2000);
+}
+
+async function refreshKnowledgeEntry({ showFailure = false } = {}) {
+  const requestGeneration = deviceKeyGeneration;
+  const requestKey = deviceKey.value.trim();
+  if (
+    !requestKey
+    || !knowledgeEntryId
+    || (knowledgeEntryRequestPending && knowledgeEntryRequestGeneration === requestGeneration)
+    || document.hidden
+  ) return;
+  const requestId = ++knowledgeEntryRequestId;
+  knowledgeEntryRequestPending = true;
+  knowledgeEntryRequestGeneration = requestGeneration;
+  try {
+    const entry = await knowledgeRequest(
+      `/api/device/knowledge/entries/${encodeURIComponent(knowledgeEntryId)}`,
+      {},
+      STATUS_REQUEST_TIMEOUT_MS,
+      requestKey,
+    );
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
+    renderKnowledgeEntry(entry);
+  } catch (error) {
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
+    handleKnowledgeError(error, { showFailure });
+  } finally {
+    if (requestId === knowledgeEntryRequestId) {
+      knowledgeEntryRequestPending = false;
+      knowledgeEntryRequestGeneration = null;
+    }
+  }
+}
+
+async function loadKnowledgeState({
+  showFailure = false,
+  allowDuringOperation = false,
+  requestGeneration,
+  requestKey,
+} = {}) {
+  const captureEntry = knowledgeOperationNeedsResync;
+  try {
+    const snapshot = await knowledgeRequest("/api/device/knowledge/state", {}, STATUS_REQUEST_TIMEOUT_MS, requestKey);
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return false;
+    if (!allowDuringOperation && knowledgeOperationPending) return false;
+    renderKnowledgeState(snapshot, { captureEntry });
+    knowledgeOperationNeedsResync = false;
+  } catch (error) {
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return false;
+    if (!allowDuringOperation && knowledgeOperationPending) return false;
+    handleKnowledgeError(error, { showFailure, captureEntry });
+    if (error.payload && error.payload.knowledge_state) {
+      knowledgeOperationNeedsResync = false;
+    }
+  }
+  return true;
+}
+
+async function refreshKnowledgeState({ showFailure = false } = {}) {
+  const requestGeneration = deviceKeyGeneration;
+  const requestKey = deviceKey.value.trim();
+  if (
+    !requestKey
+    || (
+      knowledgeStateRequestPending
+      && knowledgeStateRequestGeneration === requestGeneration
+    )
+    || knowledgeOperationPending || document.hidden
+  ) return;
+  const requestId = ++knowledgeStateRequestId;
+  knowledgeStateRequestPending = true;
+  knowledgeStateRequestGeneration = requestGeneration;
+  try {
+    const applied = await loadKnowledgeState({
+      showFailure,
+      requestGeneration,
+      requestKey,
+    });
+    if (knowledgeOperationPending) return;
+    if (applied) await refreshKnowledgeEntry({ showFailure });
+  } finally {
+    if (requestId === knowledgeStateRequestId) {
+      knowledgeStateRequestPending = false;
+      knowledgeStateRequestGeneration = null;
+    }
+  }
+}
+
+async function resyncKnowledgeState({ showFailure = false } = {}) {
+  const requestGeneration = deviceKeyGeneration;
+  const requestKey = deviceKey.value.trim();
+  if (!requestKey) return;
+  const requestId = ++knowledgeStateRequestId;
+  knowledgeStateRequestPending = true;
+  knowledgeStateRequestGeneration = requestGeneration;
+  try {
+    const applied = await loadKnowledgeState({
+      showFailure,
+      allowDuringOperation: true,
+      requestGeneration,
+      requestKey,
+    });
+    if (applied) await refreshKnowledgeEntry({ showFailure });
+  } finally {
+    if (requestId === knowledgeStateRequestId) {
+      knowledgeStateRequestPending = false;
+      knowledgeStateRequestGeneration = null;
+    }
+  }
+}
+
+function stopKnowledgePolling() {
+  if (knowledgePollTimer !== null) {
+    window.clearInterval(knowledgePollTimer);
+    knowledgePollTimer = null;
+  }
+}
+
+function startKnowledgePolling() {
+  stopKnowledgePolling();
+  if (!deviceKey.value.trim() || document.hidden) return;
+  refreshKnowledgeState({ showFailure: true });
+  knowledgePollTimer = window.setInterval(refreshKnowledgeState, 2000);
+}
+
+function stopAllPolling() {
+  stopPolling();
+  stopKnowledgePolling();
+}
+
+function startAllPolling() {
+  startPolling();
+  startKnowledgePolling();
 }
 
 function formatDuration(value) {
@@ -415,18 +805,31 @@ function showLatencyView(view) {
 }
 
 async function refreshMetrics({ showFailure = false } = {}) {
-  if (!deviceKey.value.trim() || metricsRequestPending) return;
+  const requestGeneration = deviceKeyGeneration;
+  const requestKey = deviceKey.value.trim();
+  if (
+    !requestKey
+    || (metricsRequestPending && metricsRequestGeneration === requestGeneration)
+  ) return;
+  const requestId = ++metricsRequestId;
   metricsRequestPending = true;
+  metricsRequestGeneration = requestGeneration;
   latencyRefresh.disabled = true;
   try {
-    const response = await request("/api/device/metrics", {}, STATUS_REQUEST_TIMEOUT_MS);
-    renderMetrics(await response.json());
+    const response = await request("/api/device/metrics", {}, STATUS_REQUEST_TIMEOUT_MS, requestKey);
+    const snapshot = await response.json();
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
+    renderMetrics(snapshot);
   } catch (error) {
+    if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
     if (error.message === "设备凭证无效") stopPolling();
     if (showFailure || error.message === "设备凭证无效") showError(error);
   } finally {
-    metricsRequestPending = false;
-    latencyRefresh.disabled = false;
+    if (requestId === metricsRequestId) {
+      metricsRequestPending = false;
+      metricsRequestGeneration = null;
+      latencyRefresh.disabled = false;
+    }
   }
 }
 
@@ -456,6 +859,112 @@ function updateSelectedFile(files) {
   }
 }
 
+function setKnowledgeOperationPending(pending) {
+  knowledgeOperationPending = pending;
+  updateKnowledgeControls();
+  updateLocalRecordControl();
+}
+
+async function acquireKnowledgeControl() {
+  clearError();
+  setKnowledgeOperationPending(true);
+  try {
+    const payload = await knowledgeRequest("/api/device/knowledge/acquire", { method: "POST" });
+    persistKnowledgeLease(payload.lease_token);
+    renderKnowledgeState(payload.knowledge_state);
+  } catch (error) {
+    handleKnowledgeError(error);
+    if (error.code === "knowledge_timeout") {
+      knowledgeOperationNeedsResync = true;
+      await resyncKnowledgeState({ showFailure: false });
+    }
+  } finally {
+    setKnowledgeOperationPending(false);
+    startKnowledgePolling();
+  }
+}
+
+async function runKnowledgeOperation(path, { captureEntry = false } = {}) {
+  clearError();
+  setKnowledgeOperationPending(true);
+  try {
+    const snapshot = await knowledgeRequest(path, { method: "POST" });
+    if (snapshot.control_state !== "owned") clearKnowledgeLease();
+    renderKnowledgeState(snapshot, { captureEntry });
+    if (captureEntry && knowledgeEntryId) await refreshKnowledgeEntry({ showFailure: true });
+  } catch (error) {
+    handleKnowledgeError(error);
+    if (error.code === "knowledge_timeout") {
+      knowledgeOperationNeedsResync = true;
+      await resyncKnowledgeState({ showFailure: false });
+    }
+  } finally {
+    setKnowledgeOperationPending(false);
+    startKnowledgePolling();
+  }
+}
+
+async function switchInputMode(nextMode) {
+  const leavingKnowledge = inputMode === "knowledge" && nextMode !== "knowledge";
+  if (!leavingKnowledge || !knowledgeLeaseToken) {
+    showInputMode(nextMode);
+    return;
+  }
+
+  clearError();
+  setKnowledgeOperationPending(true);
+  try {
+    const snapshot = await knowledgeRequest("/api/device/knowledge/release", { method: "POST" });
+    clearKnowledgeLease();
+    renderKnowledgeState(snapshot);
+    showInputMode(nextMode);
+  } catch (error) {
+    const errorState = error.payload && error.payload.knowledge_state;
+    handleKnowledgeError(error);
+    if (error.code === "knowledge_timeout") {
+      await resyncKnowledgeState({ showFailure: false });
+    }
+    const releaseStillOwned = (
+      knowledgeLeaseToken
+      && knowledgeSnapshot
+      && knowledgeSnapshot.control_state === "owned"
+    );
+    if (
+      error.code === "knowledge_lease_expired"
+      || (errorState && errorState.control_state !== "owned")
+      || (error.code === "knowledge_timeout" && !releaseStillOwned)
+    ) {
+      clearKnowledgeLease();
+      showInputMode(nextMode);
+    } else {
+      showInputMode("knowledge");
+    }
+  } finally {
+    setKnowledgeOperationPending(false);
+    startKnowledgePolling();
+  }
+}
+
+async function handleModeKeydown(event) {
+  const navigationKeys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+  if (!navigationKeys.includes(event.key)) return;
+  const enabledButtons = modeButtons.filter((button) => !button.disabled);
+  if (!enabledButtons.length) return;
+
+  event.preventDefault();
+  const currentIndex = Math.max(0, enabledButtons.indexOf(event.currentTarget));
+  let nextIndex = currentIndex;
+  if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = enabledButtons.length - 1;
+  else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % enabledButtons.length;
+  else nextIndex = (currentIndex - 1 + enabledButtons.length) % enabledButtons.length;
+
+  const nextButton = enabledButtons[nextIndex];
+  await switchInputMode(nextButton.dataset.mode);
+  const selectedButton = modeButtons.find((button) => button.dataset.mode === inputMode);
+  if (selectedButton) selectedButton.focus();
+}
+
 toggleKey.addEventListener("click", () => {
   const showing = deviceKey.type === "text";
   deviceKey.type = showing ? "password" : "text";
@@ -466,22 +975,49 @@ toggleKey.addEventListener("click", () => {
 });
 
 for (const button of modeButtons) {
-  button.addEventListener("click", () => showInputMode(button.dataset.mode));
+  button.addEventListener("click", async () => {
+    await switchInputMode(button.dataset.mode);
+    const selectedButton = modeButtons.find((item) => item.dataset.mode === inputMode);
+    if (selectedButton) selectedButton.focus();
+  });
+  button.addEventListener("keydown", handleModeKeydown);
 }
 
 deviceKey.addEventListener("change", () => {
-  startPolling();
+  startAllPolling();
   refreshMetrics({ showFailure: true });
   updateLocalRecordControl();
+  updateKnowledgeControls();
 });
 deviceKey.addEventListener("input", () => {
+  deviceKeyGeneration += 1;
   updateLocalRecordControl();
+  updateKnowledgeControls();
+  stopAllPolling();
   if (!deviceKey.value.trim()) {
-    stopPolling();
+    knowledgeSnapshot = null;
+    knowledgeControlState.textContent = "待校准";
+    knowledgeModeState.textContent = "未进入";
+    knowledgeProcessingStage.textContent = "--";
+    knowledgeDraft.textContent = "等待录入";
     statusMessage.textContent = "填写密钥后开始测试";
     renderMetrics(null);
     clearError();
+    updateKnowledgeControls();
   }
+});
+
+knowledgeShortPress.addEventListener("click", async () => {
+  await runKnowledgeOperation("/api/device/knowledge/short-press");
+});
+
+knowledgeLongPress.addEventListener("click", async () => {
+  if (!knowledgeLeaseToken) {
+    await acquireKnowledgeControl();
+    return;
+  }
+  const captureEntry = knowledgeSnapshot && knowledgeSnapshot.mode_state === "confirming";
+  await runKnowledgeOperation("/api/device/knowledge/long-press", { captureEntry });
 });
 
 wavFile.addEventListener("change", () => updateSelectedFile(wavFile.files));
@@ -629,16 +1165,23 @@ latencyStatsTab.addEventListener("click", () => showLatencyView("stats"));
 latencyRefresh.addEventListener("click", () => refreshMetrics({ showFailure: true }));
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stopPolling();
-  else startPolling();
+  if (document.hidden) {
+    stopAllPolling();
+    return;
+  }
+  startAllPolling();
 });
 
 window.addEventListener("beforeunload", () => {
-  stopPolling();
+  stopAllPolling();
   if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
 });
 
 renderMetrics(null);
 showInputMode("microphone");
 updateLocalRecordControl();
-if (deviceKey.value.trim()) refreshMetrics({ showFailure: true });
+updateKnowledgeControls();
+if (deviceKey.value.trim()) {
+  refreshMetrics({ showFailure: true });
+  startAllPolling();
+}

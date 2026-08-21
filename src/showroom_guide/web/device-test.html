@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#f5f8ff">
   <title>树莓派语音链路测试 · 新智惠想</title>
   <link rel="icon" href="/static/xzinfra-logo.svg">
-  <link rel="stylesheet" href="/static/device-test.css?v=20260820">
-  <script src="/static/device-test.js?v=20260820" defer></script>
+  <link rel="stylesheet" href="/static/device-test.css?v=20260821">
+  <script src="/static/device-test.js?v=20260821" defer></script>
 </head>
 <body>
   <header class="brand-bar">
@@ -40,13 +40,14 @@
 
           <fieldset class="input-method">
             <legend>输入方式</legend>
-            <div class="mode-switch" role="tablist" aria-label="语音输入方式">
-              <button type="button" role="tab" data-mode="microphone" aria-selected="true" aria-controls="microphone-input">本机麦克风</button>
-              <button type="button" role="tab" data-mode="wav" aria-selected="false" aria-controls="wav-input">WAV 文件</button>
+            <div class="mode-switch" role="tablist" aria-label="设备操作方式">
+              <button id="microphone-tab" type="button" role="tab" data-mode="microphone" aria-selected="true" aria-controls="microphone-input" tabindex="0">本机麦克风</button>
+              <button id="wav-tab" type="button" role="tab" data-mode="wav" aria-selected="false" aria-controls="wav-input" tabindex="-1">WAV 文件</button>
+              <button id="knowledge-tab" type="button" role="tab" data-mode="knowledge" aria-selected="false" aria-controls="knowledge-input" tabindex="-1">知识补充</button>
             </div>
           </fieldset>
 
-          <section class="input-mode-panel microphone-panel" id="microphone-input" role="tabpanel">
+          <section class="input-mode-panel microphone-panel" id="microphone-input" role="tabpanel" aria-labelledby="microphone-tab">
             <button class="record-button" id="local-record" type="button" disabled>
               <span class="record-indicator" aria-hidden="true"></span>
               <span id="local-record-label">开始录音</span>
@@ -58,7 +59,7 @@
             </button>
           </section>
 
-          <section class="input-mode-panel wav-panel" id="wav-input" role="tabpanel" hidden>
+          <section class="input-mode-panel wav-panel" id="wav-input" role="tabpanel" aria-labelledby="wav-tab" hidden>
             <label for="wav-file">测试音频</label>
             <label class="drop-zone" id="drop-zone" for="wav-file">
               <input id="wav-file" name="file" type="file" accept=".wav,audio/wav" required>
@@ -66,6 +67,29 @@
               <span>16 kHz · 单声道 · 16-bit PCM · 最大 10 MiB</span>
             </label>
             <button class="primary wav-submit" id="run-test" type="submit"><span>开始测试</span><b aria-hidden="true">→</b></button>
+          </section>
+
+          <section class="input-mode-panel knowledge-panel" id="knowledge-input" role="tabpanel" aria-labelledby="knowledge-tab" hidden>
+            <div class="knowledge-status-grid" aria-label="知识补充状态">
+              <div><span>控制</span><strong id="knowledge-control-state">待校准</strong></div>
+              <div><span>模式</span><strong id="knowledge-mode-state">未进入</strong></div>
+              <div><span>阶段</span><strong id="knowledge-processing-stage">--</strong></div>
+            </div>
+
+            <div class="knowledge-draft-block">
+              <label for="knowledge-draft">复述草稿</label>
+              <output id="knowledge-draft" aria-live="polite">等待录入</output>
+            </div>
+
+            <div class="knowledge-sync" id="knowledge-sync" data-sync-state="idle" aria-live="polite">
+              <span>同步</span>
+              <strong id="knowledge-sync-state">尚无待同步内容</strong>
+            </div>
+
+            <div class="knowledge-actions">
+              <button class="secondary" id="knowledge-short-press" type="button" disabled>开始录入</button>
+              <button class="primary" id="knowledge-long-press" type="button" disabled>进入知识补充</button>
+            </div>
           </section>
 
           <button class="secondary reset-button" id="reset-device" type="button">重置设备</button>

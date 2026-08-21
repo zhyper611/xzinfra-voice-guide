@@ -176,7 +176,7 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
         response = client.get("/static/device-test.js")
 
     assert response.status_code == 200
-    assert 'headers.set("X-Device-Key", deviceKey.value.trim())' in response.text
+    assert 'headers.set("X-Device-Key", key)' in response.text
     assert 'request("/api/device/turn"' in response.text
     assert 'request("/api/device/recording/start"' in response.text
     assert 'request("/api/device/recording/stop"' in response.text
@@ -200,7 +200,7 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'latency-current-tab' in response.text
     assert 'latency-stats-tab' in response.text
     assert "localStorage" not in response.text
-    assert "sessionStorage" not in response.text
+    assert 'const KNOWLEDGE_LEASE_KEY = "showroom-knowledge-lease"' in response.text
     assert "document.cookie" not in response.text
     assert "innerHTML" not in response.text
     assert "if (!operationPending) clearError()" not in response.text
@@ -221,6 +221,140 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert "new AbortController()" in response.text
     assert "REQUEST_TIMEOUT_MS" in response.text
     assert "请求超时，请检查网络后重试" in response.text
+
+
+def test_device_test_page_exposes_knowledge_capture_controls():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/device-test")
+
+    assert response.status_code == 200
+    assert 'data-mode="knowledge"' in response.text
+    assert 'id="microphone-tab"' in response.text
+    assert 'id="wav-tab"' in response.text
+    assert 'id="knowledge-tab"' in response.text
+    assert 'aria-labelledby="microphone-tab"' in response.text
+    assert 'aria-labelledby="wav-tab"' in response.text
+    assert 'aria-labelledby="knowledge-tab"' in response.text
+    assert 'tabindex="0"' in response.text
+    assert 'tabindex="-1"' in response.text
+    assert 'aria-controls="knowledge-input"' in response.text
+    assert 'id="knowledge-input"' in response.text
+    assert 'id="knowledge-control-state"' in response.text
+    assert 'id="knowledge-mode-state"' in response.text
+    assert 'id="knowledge-processing-stage"' in response.text
+    assert 'id="knowledge-draft"' in response.text
+    assert '<output id="knowledge-draft"' in response.text
+    assert 'id="knowledge-sync"' in response.text
+    assert 'id="knowledge-sync-state"' in response.text
+    assert 'id="knowledge-short-press"' in response.text
+    assert 'id="knowledge-long-press"' in response.text
+
+
+def test_device_test_styles_keep_knowledge_controls_stable_and_responsive():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/static/device-test.css")
+
+    assert response.status_code == 200
+    css = response.text.replace("\r\n", "\n")
+    assert ".knowledge-status-grid" in css
+    assert ".knowledge-actions" in css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+    assert "#knowledge-draft" in css
+    assert '@media (max-width: 599px)' in css
+    assert ".knowledge-actions {\n    grid-template-columns: 1fr;" in css
+    assert "overflow-wrap: anywhere" in css
+
+
+def test_device_test_script_implements_knowledge_lease_and_resync_contract():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/static/device-test.js")
+
+    assert response.status_code == 200
+    script = response.text
+    assert 'const KNOWLEDGE_LEASE_KEY = "showroom-knowledge-lease"' in script
+    assert "sessionStorage.getItem(KNOWLEDGE_LEASE_KEY)" in script
+    assert "sessionStorage.setItem(KNOWLEDGE_LEASE_KEY, knowledgeLeaseToken)" in script
+    assert "sessionStorage.removeItem(KNOWLEDGE_LEASE_KEY)" in script
+    assert 'headers.set("X-Knowledge-Lease", knowledgeLeaseToken)' in script
+    assert 'knowledgeRequest("/api/device/knowledge/acquire"' in script
+    assert 'knowledgeRequest("/api/device/knowledge/state"' in script
+    assert 'runKnowledgeOperation("/api/device/knowledge/short-press"' in script
+    assert 'runKnowledgeOperation("/api/device/knowledge/long-press"' in script
+    assert 'knowledgeRequest("/api/device/knowledge/release"' in script
+    assert "async function switchInputMode(nextMode)" in script
+    assert 'inputMode === "knowledge" && nextMode !== "knowledge"' in script
+    assert 'errorState.control_state !== "owned"' in script
+    assert 'showInputMode("knowledge")' in script
+    assert '`/api/device/knowledge/entries/${encodeURIComponent(knowledgeEntryId)}`' in script
+    assert "knowledgePollTimer = window.setInterval(refreshKnowledgeState, 2000)" in script
+    assert "document.hidden" in script
+    assert 'document.addEventListener("visibilitychange"' in script
+    assert "stopAllPolling()" in script
+    assert "refreshKnowledgeState({ showFailure: true });" in script
+    assert "error.code = payload.code" in script
+    assert "error.payload = payload" in script
+    assert 'error.code === "knowledge_lease_expired"' in script
+    assert "await resyncKnowledgeState({ showFailure: false })" in script
+    assert "async function resyncKnowledgeState" in script
+    assert "if (knowledgeOperationPending) return;" in script
+    assert "if (snapshot.last_entry_id)" in script
+    assert 'entry.sync_state === "synced"' in script
+    assert 'entry.sync_state === "retrying"' in script
+    assert "knowledgeShortPress.disabled" in script
+    assert "knowledgeLongPress.disabled" in script
+    assert 'knowledgeSnapshot.mode_state === "recording"' in script
+    assert 'knowledgeSnapshot.mode_state === "processing"' in script
+    assert 'knowledgeSnapshot.mode_state !== "inactive"' in script
+    assert "runTest.disabled = operationPending || standardControlsBlocked" in script
+    assert "resetDevice.disabled = operationPending || standardControlsBlocked" in script
+    assert "localRecord.disabled" in script and "standardControlsBlocked" in script
+    assert "replayRecording.disabled" in script and "standardControlsBlocked" in script
+    assert "knowledgeOperationPending || document.hidden" in script
+    assert "button.tabIndex = button.dataset.mode === mode ? 0 : -1" in script
+    assert '["ArrowLeft", "ArrowRight", "Home", "End"]' in script
+    assert "await switchInputMode(nextButton.dataset.mode)" in script
+    assert 'window.addEventListener("beforeunload"' in script
+
+    input_handler = script.split('deviceKey.addEventListener("input"', 1)[1].split(
+        'knowledgeShortPress.addEventListener', 1
+    )[0]
+    assert "startKnowledgePolling()" not in input_handler
+    assert "if (!deviceKey.value.trim())" in input_handler
+
+    visibility_handler = script.split(
+        'document.addEventListener("visibilitychange"', 1
+    )[1].split('window.addEventListener("beforeunload"', 1)[0]
+    assert visibility_handler.count("startAllPolling();") == 1
+    assert "await refreshState" not in visibility_handler
+    assert "await refreshKnowledgeState" not in visibility_handler
+
+
+def test_device_test_polling_discards_stale_device_key_requests():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/static/device-test.js")
+
+    assert response.status_code == 200
+    script = response.text
+    assert "let deviceKeyGeneration = 0" in script
+    assert "deviceKeyGeneration += 1" in script
+    assert "function isCurrentDeviceKeyRequest(generation, key)" in script
+    assert script.count("const requestGeneration = deviceKeyGeneration") >= 4
+    assert script.count("const requestKey = deviceKey.value.trim()") >= 4
+    assert script.count(
+        "if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;"
+    ) >= 4
+    assert "const requestId = ++stateRequestId" in script
+    assert "const requestId = ++knowledgeStateRequestId" in script
+    assert "const requestId = ++knowledgeEntryRequestId" in script
+    assert "const requestId = ++metricsRequestId" in script
+    assert "if (requestId === stateRequestId)" in script
+    assert "if (requestId === knowledgeStateRequestId)" in script
+    assert "if (requestId === knowledgeEntryRequestId)" in script
+    assert "if (requestId === metricsRequestId)" in script
 
 
 def test_index_uses_local_xzinfra_brand_assets():

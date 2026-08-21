@@ -15,6 +15,14 @@ from showroom_guide.device import (
     NoSpeechDetected,
 )
 from showroom_guide.main import create_app
+from showroom_guide.knowledge_mode import KnowledgeModeState, KnowledgeProcessingStage
+from showroom_guide.knowledge_web import (
+    KnowledgeControlState,
+    KnowledgeEntrySnapshot,
+    KnowledgeSyncState,
+    KnowledgeWebError,
+    KnowledgeWebState,
+)
 from showroom_guide.local_audio import LocalAudioError
 from showroom_guide.local_device import LastRecordingNotFound
 from showroom_guide.models import GuidePhase, GuideSnapshot
@@ -76,6 +84,13 @@ class FakeRuntime:
         self.device_api_key = SecretStr(DEVICE_KEY)
         self.device_max_upload_bytes = 1024
         self.cleanup_seconds = 60.0
+        self.knowledge_web = MagicMock()
+        self.knowledge_web.acquire = AsyncMock()
+        self.knowledge_web.state = AsyncMock()
+        self.knowledge_web.short_press = AsyncMock()
+        self.knowledge_web.long_press = AsyncMock()
+        self.knowledge_web.release = AsyncMock()
+        self.knowledge_web.entry = AsyncMock()
         self.aclose = AsyncMock()
 
 
@@ -95,6 +110,12 @@ def authorized_headers() -> dict[str, str]:
         ("get", "/api/device/audio/audio-id", {}),
         ("post", "/api/device/playback-finished", {}),
         ("post", "/api/device/reset", {}),
+        ("post", "/api/device/knowledge/acquire", {}),
+        ("get", "/api/device/knowledge/state", {}),
+        ("post", "/api/device/knowledge/short-press", {}),
+        ("post", "/api/device/knowledge/long-press", {}),
+        ("post", "/api/device/knowledge/release", {}),
+        ("get", "/api/device/knowledge/entries/entry-id", {}),
     ],
 )
 @pytest.mark.parametrize("provided_key", [None, "wrong-device-key"])
@@ -408,3 +429,264 @@ def test_device_reset_rejects_busy_session():
 
     assert response.status_code == 409
     assert response.json()["detail"] == "设备问题正在处理中，暂时不能重置"
+
+
+def knowledge_state(
+    *,
+    enabled: bool = True,
+    mode_state: KnowledgeModeState = KnowledgeModeState.READY,
+    processing_stage: KnowledgeProcessingStage | None = None,
+    control_state: KnowledgeControlState = KnowledgeControlState.OWNED,
+    lease_expires_at: float | None = 1234.5,
+    draft_text: str | None = None,
+    last_entry_id: str | None = None,
+) -> KnowledgeWebState:
+    return KnowledgeWebState(
+        enabled=enabled,
+        mode_state=mode_state,
+        processing_stage=processing_stage,
+        control_state=control_state,
+        lease_expires_at=lease_expires_at,
+        draft_text=draft_text,
+        last_entry_id=last_entry_id,
+    )
+
+
+def knowledge_headers(lease_token: str | None = None) -> dict[str, str]:
+    headers = authorized_headers()
+    if lease_token is not None:
+        headers["X-Knowledge-Lease"] = lease_token
+    return headers
+
+
+def test_knowledge_acquire_returns_lease_and_serialized_state_without_device_key():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.acquire.return_value = (
+        "lease-token",
+        knowledge_state(draft_text="待确认知识"),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/acquire",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "lease_token": "lease-token",
+        "knowledge_state": {
+            "enabled": True,
+            "mode_state": "ready",
+            "processing_stage": None,
+            "control_state": "owned",
+            "lease_expires_at": 1234.5,
+            "draft_text": "待确认知识",
+            "last_entry_id": None,
+        },
+    }
+    assert DEVICE_KEY not in response.text
+    runtime.knowledge_web.acquire.assert_awaited_once_with()
+
+
+def test_second_knowledge_acquire_returns_busy_observer_state_with_redacted_draft():
+    runtime = FakeRuntime()
+    observer = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        processing_stage=KnowledgeProcessingStage.SYNTHESIZING,
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+        draft_text=None,
+    )
+    runtime.knowledge_web.acquire.side_effect = KnowledgeWebError(
+        "knowledge_control_busy",
+        "知识补充功能正由其他页面控制",
+        409,
+        observer,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/acquire",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "knowledge_control_busy",
+        "detail": "知识补充功能正由其他页面控制",
+        "knowledge_state": {
+            "enabled": True,
+            "mode_state": "confirming",
+            "processing_stage": "synthesizing",
+            "control_state": "observed",
+            "lease_expires_at": None,
+            "draft_text": None,
+            "last_entry_id": None,
+        },
+    }
+
+
+def test_knowledge_acquire_returns_disabled_error_code():
+    runtime = FakeRuntime()
+    disabled = knowledge_state(
+        enabled=False,
+        mode_state=KnowledgeModeState.INACTIVE,
+        control_state=KnowledgeControlState.AVAILABLE,
+        lease_expires_at=None,
+    )
+    runtime.knowledge_web.acquire.side_effect = KnowledgeWebError(
+        "knowledge_capture_disabled",
+        "知识补充功能未启用",
+        503,
+        disabled,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/acquire",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "knowledge_capture_disabled"
+    assert response.json()["knowledge_state"]["enabled"] is False
+    assert isinstance(response.json()["detail"], str)
+
+
+def test_knowledge_state_allows_observer_without_lease_and_redacts_owner_fields():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.state.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        processing_stage=KnowledgeProcessingStage.PLAYING_REVIEW,
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+        draft_text=None,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/state",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["control_state"] == "observed"
+    assert response.json()["processing_stage"] == "playing_review"
+    assert response.json()["lease_expires_at"] is None
+    assert response.json()["draft_text"] is None
+    runtime.knowledge_web.state.assert_awaited_once_with(None)
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name"),
+    [
+        ("/api/device/knowledge/short-press", "short_press"),
+        ("/api/device/knowledge/long-press", "long_press"),
+        ("/api/device/knowledge/release", "release"),
+    ],
+)
+@pytest.mark.parametrize("lease_token", [None, "wrong-lease"])
+def test_knowledge_control_rejects_missing_or_wrong_lease_with_domain_error(
+    path,
+    method_name,
+    lease_token,
+):
+    runtime = FakeRuntime()
+    method = getattr(runtime.knowledge_web, method_name)
+    error_state = knowledge_state(
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+    )
+    runtime.knowledge_web.state.return_value = error_state
+    method.side_effect = KnowledgeWebError(
+        "knowledge_lease_expired",
+        "知识补充控制权已过期",
+        409,
+        error_state,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(path, headers=knowledge_headers(lease_token))
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "knowledge_lease_expired"
+    assert response.json()["detail"] == "知识补充控制权已过期"
+    assert response.json()["knowledge_state"]["control_state"] == "observed"
+    if lease_token is None:
+        runtime.knowledge_web.state.assert_awaited_once_with()
+        method.assert_not_awaited()
+    else:
+        method.assert_awaited_once_with(lease_token)
+
+
+def test_knowledge_long_press_returns_saved_entry_id():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.long_press.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.INACTIVE,
+        control_state=KnowledgeControlState.AVAILABLE,
+        lease_expires_at=None,
+        last_entry_id="saved-entry",
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/long-press",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["last_entry_id"] == "saved-entry"
+    assert response.json()["control_state"] == "available"
+    runtime.knowledge_web.long_press.assert_awaited_once_with("lease-token")
+
+
+def test_knowledge_entry_returns_sync_snapshot_without_requiring_lease():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.entry.return_value = KnowledgeEntrySnapshot(
+        entry_id="saved-entry",
+        sync_state=KnowledgeSyncState.SYNCED,
+        attempts=2,
+        last_error=None,
+        next_attempt_at=1200.0,
+        updated_at=1300.0,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/entries/saved-entry",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "entry_id": "saved-entry",
+        "sync_state": "synced",
+        "attempts": 2,
+        "last_error": None,
+        "next_attempt_at": 1200.0,
+        "updated_at": 1300.0,
+    }
+    runtime.knowledge_web.entry.assert_awaited_once_with("saved-entry")
+
+
+def test_knowledge_controller_error_uses_top_level_structured_payload():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.short_press.side_effect = KnowledgeWebError(
+        "asr_unavailable",
+        "语音识别暂时不可用",
+        503,
+        knowledge_state(draft_text="不会丢失的草稿"),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/short-press",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "asr_unavailable"
+    assert response.json()["detail"] == "语音识别暂时不可用"
+    assert response.json()["knowledge_state"]["draft_text"] == "不会丢失的草稿"
+    assert isinstance(response.json()["detail"], str)
