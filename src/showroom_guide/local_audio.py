@@ -15,6 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 ProcessFactory = Callable[..., Awaitable[asyncio.subprocess.Process]]
+RECORDING_START_SETTLE_SECONDS = 0.3
 
 
 def _create_chirp_wav(
@@ -108,6 +109,7 @@ class LocalAudioController:
         if self.is_recording or self.is_playing:
             raise LocalAudioBusy("音频设备正在使用")
 
+        await asyncio.sleep(RECORDING_START_SETTLE_SECONDS)
         descriptor, raw_path = tempfile.mkstemp(suffix=".wav")
         os.close(descriptor)
         path = Path(raw_path)
