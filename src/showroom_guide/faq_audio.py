@@ -1015,7 +1015,8 @@ def speech_client_from_settings(settings: Settings) -> SpeechClient:
         settings.tts_model,
         settings.tts_voice,
         settings.tts_speed,
-        settings.request_timeout_seconds,
+        settings.asr_timeout_seconds,
+        settings.tts_timeout_seconds,
     )
 
 
