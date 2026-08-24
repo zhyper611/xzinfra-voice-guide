@@ -5,13 +5,18 @@ import sqlite3
 import pytest
 
 from showroom_guide.button_workflow import ButtonInteractionMode, DeviceButtonWorkflow
-from showroom_guide.device import InvalidDeviceAudio, NoSpeechDetected
+from showroom_guide.device import (
+    InvalidWavFormat,
+    NoSpeechDetected,
+    RecordingTooShort,
+)
 from showroom_guide.knowledge_capture import (
     KnowledgeAsrUnavailable,
     KnowledgeTtsUnavailable,
 )
 from showroom_guide.knowledge_mode import (
     KnowledgeLongPressResult,
+    KnowledgeModeInvalidState,
     KnowledgeModeState,
     KnowledgeProcessingStage,
 )
@@ -71,7 +76,9 @@ class StatefulKnowledge:
         self.state = KnowledgeModeState.INACTIVE
         self.processing_stage = None
         self.draft_text = None
+        self.draft_audio = None
         self.short_error = None
+        self.review_upload_error = None
         self.long_error = None
         self.cancel_error = None
         self.cancel_clears_on_error = True
@@ -81,6 +88,9 @@ class StatefulKnowledge:
         self.enter_release: asyncio.Event | None = None
         self.short_started = asyncio.Event()
         self.short_release: asyncio.Event | None = None
+        self.review_upload_started = asyncio.Event()
+        self.review_upload_release: asyncio.Event | None = None
+        self.review_upload_calls = []
         self.saved_entry = KnowledgeEntry(
             id="entry-id",
             content="展厅知识正文",
@@ -110,6 +120,28 @@ class StatefulKnowledge:
         if self.state is KnowledgeModeState.RECORDING:
             self.state = KnowledgeModeState.CONFIRMING
             self.draft_text = "展厅知识正文"
+            self.draft_audio = b"review-wav"
+
+    async def review_upload(self, audio: bytes) -> None:
+        self.review_upload_calls.append(audio)
+        if self.state is not KnowledgeModeState.READY:
+            raise KnowledgeModeInvalidState("知识补充模式当前无法处理上传")
+        self.review_upload_started.set()
+        self.state = KnowledgeModeState.PROCESSING
+        self.processing_stage = KnowledgeProcessingStage.TRANSCRIBING
+        try:
+            if self.review_upload_release is not None:
+                await self.review_upload_release.wait()
+            if self.review_upload_error is not None:
+                raise self.review_upload_error
+        except BaseException:
+            self.state = KnowledgeModeState.READY
+            raise
+        finally:
+            self.processing_stage = None
+        self.state = KnowledgeModeState.CONFIRMING
+        self.draft_text = "展厅知识正文"
+        self.draft_audio = b"review-wav"
 
     async def long_press(self) -> KnowledgeLongPressResult:
         self.long_calls += 1
@@ -118,6 +150,7 @@ class StatefulKnowledge:
         saved_entry = self.saved_entry if self.draft_text is not None else None
         self.state = KnowledgeModeState.INACTIVE
         self.draft_text = None
+        self.draft_audio = None
         return KnowledgeLongPressResult(exited=True, saved_entry=saved_entry)
 
     async def cancel(self) -> None:
@@ -127,6 +160,7 @@ class StatefulKnowledge:
         self.state = KnowledgeModeState.INACTIVE
         self.processing_stage = None
         self.draft_text = None
+        self.draft_audio = None
         if self.cancel_error is not None:
             raise self.cancel_error
 
@@ -303,6 +337,230 @@ async def test_owner_poll_renews_lease(tmp_path):
 
     assert renewed.lease_expires_at == initial_deadline + 30
     assert knowledge.cancel_calls == 0
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owner_can_review_upload_and_read_draft_audio(tmp_path):
+    controller, knowledge, _, _, _ = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+
+    reviewed = await controller.review_upload(token, b"uploaded-wav")
+    audio = await controller.review_audio(token)
+
+    assert knowledge.review_upload_calls == [b"uploaded-wav"]
+    assert reviewed.control_state is KnowledgeControlState.OWNED
+    assert reviewed.mode_state is KnowledgeModeState.CONFIRMING
+    assert reviewed.draft_text == "展厅知识正文"
+    assert audio == b"review-wav"
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation_name", ["review_upload", "review_audio"])
+async def test_review_operations_reject_non_owner(
+    tmp_path,
+    operation_name,
+):
+    controller, knowledge, _, _, _ = make_controller(tmp_path)
+    _, _ = await controller.acquire()
+    knowledge.draft_audio = b"review-wav"
+
+    operation = getattr(controller, operation_name)
+    with pytest.raises(KnowledgeWebError) as caught:
+        if operation_name == "review_upload":
+            await operation("not-the-owner", b"uploaded-wav")
+        else:
+            await operation("not-the-owner")
+
+    assert caught.value.code == "knowledge_lease_expired"
+    assert knowledge.review_upload_calls == []
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_review_audio_renews_lease(tmp_path):
+    controller, knowledge, _, clock, sleep = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+    await asyncio.sleep(0)
+    knowledge.state = KnowledgeModeState.CONFIRMING
+    knowledge.draft_audio = b"review-wav"
+    clock.advance(30)
+
+    assert await controller.review_audio(token) == b"review-wav"
+
+    clock.advance(91)
+    sleep.release_pending()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert knowledge.cancel_calls == 0
+    assert (await controller.state(token)).control_state is KnowledgeControlState.OWNED
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_review_upload_crossing_deadline_renews_from_completion(tmp_path):
+    controller, knowledge, _, clock, sleep = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+    await asyncio.sleep(0)
+    initial_expiry_waiter = sleep.waiters[0]
+    knowledge.review_upload_release = asyncio.Event()
+    running = asyncio.create_task(
+        controller.review_upload(token, b"uploaded-wav")
+    )
+    await knowledge.review_upload_started.wait()
+    await asyncio.sleep(0)
+    try:
+        assert initial_expiry_waiter.cancelled()
+        clock.advance(121)
+        sleep.release_pending()
+        await asyncio.sleep(0)
+        knowledge.review_upload_release.set()
+        completed = await running
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert completed.control_state is KnowledgeControlState.OWNED
+        assert completed.mode_state is KnowledgeModeState.CONFIRMING
+        assert completed.lease_expires_at == clock.now + 120
+        assert knowledge.draft_audio == b"review-wav"
+        assert knowledge.cancel_calls == 0
+    finally:
+        knowledge.review_upload_release.set()
+        if not running.done():
+            await running
+        await controller.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation_name", ["review_upload", "review_audio"])
+async def test_review_operations_are_busy_while_upload_is_running(
+    tmp_path,
+    operation_name,
+):
+    controller, knowledge, _, _, _ = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+    knowledge.review_upload_release = asyncio.Event()
+    running = asyncio.create_task(
+        controller.review_upload(token, b"uploaded-wav")
+    )
+    await knowledge.review_upload_started.wait()
+
+    operation = getattr(controller, operation_name)
+    try:
+        with pytest.raises(KnowledgeWebError) as caught:
+            if operation_name == "review_upload":
+                await operation(token, b"second-wav")
+            else:
+                await operation(token)
+
+        assert caught.value.code == "knowledge_operation_busy"
+        assert caught.value.status_code == 409
+    finally:
+        knowledge.review_upload_release.set()
+        await running
+        await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_review_upload_invalid_workflow_state_is_mapped_and_renews_lease(
+    tmp_path,
+):
+    controller, knowledge, _, clock, _ = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+    knowledge.state = KnowledgeModeState.CONFIRMING
+    knowledge.draft_text = "原草稿"
+    knowledge.draft_audio = b"old-review-wav"
+    clock.advance(30)
+
+    with pytest.raises(KnowledgeWebError) as caught:
+        await controller.review_upload(token, b"uploaded-wav")
+
+    assert caught.value.code == "knowledge_operation_invalid_state"
+    assert caught.value.detail == "知识补充模式当前无法处理上传"
+    assert caught.value.status_code == 409
+    owned = await controller.state(token)
+    assert owned.control_state is KnowledgeControlState.OWNED
+    assert owned.lease_expires_at == clock.now + 120
+    assert knowledge.state is KnowledgeModeState.CONFIRMING
+    assert knowledge.draft_audio == b"old-review-wav"
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_missing_review_audio_has_stable_not_found_error(tmp_path):
+    controller, _, _, _, _ = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+
+    with pytest.raises(KnowledgeWebError) as caught:
+        await controller.review_audio(token)
+
+    assert caught.value.code == "knowledge_review_not_found"
+    assert caught.value.detail == "知识复述语音不存在"
+    assert caught.value.status_code == 404
+    assert caught.value.state.control_state is KnowledgeControlState.OWNED
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode_state", "draft_audio"),
+    [
+        (KnowledgeModeState.READY, b"stale-review-wav"),
+        (KnowledgeModeState.CONFIRMING, b""),
+    ],
+    ids=["stale-audio-outside-confirming", "empty-confirming-audio"],
+)
+async def test_review_audio_rejects_unavailable_draft(
+    tmp_path,
+    mode_state,
+    draft_audio,
+):
+    controller, knowledge, _, _, _ = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+    knowledge.state = mode_state
+    knowledge.draft_audio = draft_audio
+
+    with pytest.raises(KnowledgeWebError) as caught:
+        await controller.review_audio(token)
+
+    assert caught.value.code == "knowledge_review_not_found"
+    assert caught.value.detail == "知识复述语音不存在"
+    assert caught.value.status_code == 404
+    assert caught.value.state.control_state is KnowledgeControlState.OWNED
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "code", "status_code"),
+    [
+        (InvalidWavFormat("invalid wav"), "invalid_audio", 415),
+        (RecordingTooShort("too short"), "recording_too_short", 422),
+        (NoSpeechDetected("no speech"), "no_speech", 422),
+        (KnowledgeAsrUnavailable("asr"), "asr_unavailable", 503),
+        (KnowledgeTtsUnavailable("tts"), "tts_unavailable", 503),
+    ],
+)
+async def test_review_upload_maps_domain_errors(
+    tmp_path,
+    error,
+    code,
+    status_code,
+):
+    controller, knowledge, _, _, _ = make_controller(tmp_path)
+    token, _ = await controller.acquire()
+    knowledge.review_upload_error = error
+
+    with pytest.raises(KnowledgeWebError) as caught:
+        await controller.review_upload(token, b"uploaded-wav")
+
+    assert caught.value.code == code
+    assert caught.value.status_code == status_code
+    assert caught.value.detail == str(error)
+    assert caught.value.state.control_state is KnowledgeControlState.OWNED
+    assert knowledge.state is KnowledgeModeState.READY
     await controller.aclose()
 
 
@@ -837,7 +1095,7 @@ async def test_close_error_after_cleanup_does_not_leave_stale_lease(tmp_path):
 @pytest.mark.parametrize(
     ("error", "code", "status_code"),
     [
-        (InvalidDeviceAudio("too short"), "recording_too_short", 422),
+        (RecordingTooShort("too short"), "recording_too_short", 422),
         (NoSpeechDetected("no speech"), "no_speech", 422),
         (KnowledgeAsrUnavailable("asr"), "asr_unavailable", 503),
         (KnowledgeTtsUnavailable("tts"), "tts_unavailable", 503),

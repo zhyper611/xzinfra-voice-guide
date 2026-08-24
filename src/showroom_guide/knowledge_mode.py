@@ -1,9 +1,5 @@
 import asyncio
-import io
 import logging
-import math
-import struct
-import wave
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -11,10 +7,12 @@ from showroom_guide.device import (
     InvalidDeviceAudio,
     NO_SPEECH_MESSAGE,
     NoSpeechDetected,
-    validate_wav,
+    RecordingTooShort,
+    inspect_wav,
 )
 from showroom_guide.knowledge_capture import (
     KnowledgeAsrUnavailable,
+    KnowledgeDraft,
     KnowledgeTtsUnavailable,
 )
 from showroom_guide.knowledge_outbox import KnowledgeEntry
@@ -22,6 +20,10 @@ from showroom_guide.local_audio import LocalAudioError
 
 
 logger = logging.getLogger(__name__)
+
+
+class KnowledgeModeInvalidState(RuntimeError):
+    pass
 
 
 class KnowledgeModeState(StrEnum):
@@ -76,6 +78,10 @@ class KnowledgeModeWorkflow:
     def draft_text(self) -> str | None:
         return self._capture.draft_text
 
+    @property
+    def draft_audio(self) -> bytes | None:
+        return self._capture.draft_audio
+
     async def enter(self) -> None:
         async with self._operation_lock:
             if self._state is not KnowledgeModeState.INACTIVE:
@@ -94,6 +100,21 @@ class KnowledgeModeWorkflow:
                 return
             if self._state is KnowledgeModeState.RECORDING:
                 await self._finish_recording()
+
+    async def review_upload(self, captured: bytes) -> None:
+        async with self._operation_lock:
+            if self._state is not KnowledgeModeState.READY:
+                raise KnowledgeModeInvalidState("知识补充模式当前无法处理上传")
+            self._state = KnowledgeModeState.PROCESSING
+            try:
+                draft = await self._create_draft(captured)
+                self._capture.accept(draft)
+                self._state = KnowledgeModeState.CONFIRMING
+            except BaseException:
+                self._state = KnowledgeModeState.READY
+                raise
+            finally:
+                self._processing_stage = None
 
     async def long_press(self) -> KnowledgeLongPressResult:
         async with self._operation_lock:
@@ -161,14 +182,7 @@ class KnowledgeModeWorkflow:
         try:
             captured = await self._audio.stop_recording()
             await self._play_cue_safely(self._audio.play_stop_cue)
-            if self._duration_seconds(captured) < self._min_recording_seconds:
-                raise InvalidDeviceAudio("录音时间太短，请重新录入。")
-            if self._dbfs(captured) < self._min_recording_dbfs:
-                raise NoSpeechDetected(NO_SPEECH_MESSAGE)
-            self._processing_stage = KnowledgeProcessingStage.TRANSCRIBING
-            transcript = await self._capture.transcribe(captured)
-            self._processing_stage = KnowledgeProcessingStage.SYNTHESIZING
-            draft = await self._capture.synthesize_review(transcript)
+            draft = await self._create_draft(captured)
             self._processing_stage = KnowledgeProcessingStage.PLAYING_REVIEW
             await self._audio.play(draft.audio)
             self._capture.accept(draft)
@@ -202,6 +216,17 @@ class KnowledgeModeWorkflow:
         finally:
             self._processing_stage = None
 
+    async def _create_draft(self, captured: bytes) -> KnowledgeDraft:
+        metrics = await asyncio.to_thread(inspect_wav, captured)
+        if metrics.duration_seconds < self._min_recording_seconds:
+            raise RecordingTooShort("录音时间太短，请重新录入。")
+        if metrics.dbfs < self._min_recording_dbfs:
+            raise NoSpeechDetected(NO_SPEECH_MESSAGE)
+        self._processing_stage = KnowledgeProcessingStage.TRANSCRIBING
+        transcript = await self._capture.transcribe(captured)
+        self._processing_stage = KnowledgeProcessingStage.SYNTHESIZING
+        return await self._capture.synthesize_review(transcript)
+
     async def _stop_after_timeout(self) -> None:
         try:
             await asyncio.sleep(self._max_recording_seconds)
@@ -232,21 +257,3 @@ class KnowledgeModeWorkflow:
         prompt = getattr(self._audio, "play_prompt", None)
         if prompt is not None:
             await self._play_cue_safely(lambda: prompt(name))
-
-    @staticmethod
-    def _duration_seconds(audio: bytes) -> float:
-        validate_wav(audio)
-        with wave.open(io.BytesIO(audio), "rb") as source:
-            return source.getnframes() / source.getframerate()
-
-    @staticmethod
-    def _dbfs(audio: bytes) -> float:
-        with wave.open(io.BytesIO(audio), "rb") as source:
-            frames = source.readframes(source.getnframes())
-        samples = [sample for (sample,) in struct.iter_unpack("<h", frames)]
-        if not samples:
-            return -math.inf
-        rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
-        if rms == 0:
-            return -math.inf
-        return 20 * math.log10(rms / 32768)

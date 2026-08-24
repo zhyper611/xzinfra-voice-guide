@@ -46,6 +46,10 @@ class KnowledgeCaptureSession:
     def draft_text(self) -> str | None:
         return self._draft.text if self._draft is not None else None
 
+    @property
+    def draft_audio(self) -> bytes | None:
+        return self._draft.audio if self._draft is not None else None
+
     async def transcribe(self, audio: bytes) -> str:
         try:
             transcript = await self._speech.transcribe(io.BytesIO(audio))

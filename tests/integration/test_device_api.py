@@ -1,10 +1,14 @@
+import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import starlette.formparsers as starlette_formparsers
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from showroom_guide.controller import GuideServiceUnavailable, QuestionInProgress
 from showroom_guide.device import (
@@ -32,13 +36,13 @@ from showroom_guide.sessions import SessionManager
 DEVICE_KEY = "device-test-key"
 
 
-def make_wav() -> bytes:
+def make_wav(frame_count: int = 160) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(16000)
-        audio.writeframes(b"\x00\x00" * 160)
+        audio.writeframes(b"\x00\x00" * frame_count)
     return output.getvalue()
 
 
@@ -88,6 +92,8 @@ class FakeRuntime:
         self.knowledge_web.acquire = AsyncMock()
         self.knowledge_web.state = AsyncMock()
         self.knowledge_web.short_press = AsyncMock()
+        self.knowledge_web.review_upload = AsyncMock()
+        self.knowledge_web.review_audio = AsyncMock()
         self.knowledge_web.long_press = AsyncMock()
         self.knowledge_web.release = AsyncMock()
         self.knowledge_web.entry = AsyncMock()
@@ -113,6 +119,12 @@ def authorized_headers() -> dict[str, str]:
         ("post", "/api/device/knowledge/acquire", {}),
         ("get", "/api/device/knowledge/state", {}),
         ("post", "/api/device/knowledge/short-press", {}),
+        (
+            "post",
+            "/api/device/knowledge/upload",
+            {"files": {"file": ("knowledge.wav", make_wav(), "audio/wav")}},
+        ),
+        ("get", "/api/device/knowledge/review-audio", {}),
         ("post", "/api/device/knowledge/long-press", {}),
         ("post", "/api/device/knowledge/release", {}),
         ("get", "/api/device/knowledge/entries/entry-id", {}),
@@ -576,6 +588,410 @@ def test_knowledge_state_allows_observer_without_lease_and_redacts_owner_fields(
     assert response.json()["lease_expires_at"] is None
     assert response.json()["draft_text"] is None
     runtime.knowledge_web.state.assert_awaited_once_with(None)
+
+
+def test_knowledge_upload_returns_state_and_review_audio_url_without_secrets():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.review_upload.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        draft_text="待确认知识",
+    )
+    source = make_wav()
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", source, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "knowledge_state": {
+            "enabled": True,
+            "mode_state": "confirming",
+            "processing_stage": None,
+            "control_state": "owned",
+            "lease_expires_at": 1234.5,
+            "draft_text": "待确认知识",
+            "last_entry_id": None,
+        },
+        "review_audio_url": "/api/device/knowledge/review-audio",
+    }
+    assert DEVICE_KEY not in response.text
+    assert "lease-token" not in response.text
+    runtime.knowledge_web.review_upload.assert_awaited_once_with(
+        "lease-token",
+        source,
+    )
+
+
+def test_knowledge_upload_authenticates_before_parsing_multipart(monkeypatch):
+    runtime = FakeRuntime()
+    parse_calls = 0
+    original_parse = MultiPartParser.parse
+
+    async def track_parse(parser):
+        nonlocal parse_calls
+        parse_calls += 1
+        return await original_parse(parser)
+
+    monkeypatch.setattr(MultiPartParser, "parse", track_parse)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers={"X-Device-Key": "wrong-device-key"},
+            files={"file": ("knowledge.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == 401
+    assert parse_calls == 0
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+def test_knowledge_review_audio_is_wav_and_not_cached():
+    runtime = FakeRuntime()
+    review_audio = make_wav()
+    runtime.knowledge_web.review_audio.return_value = review_audio
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/review-audio",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 200
+    assert response.content == review_audio
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.headers["cache-control"] == "no-store"
+    assert DEVICE_KEY not in response.text
+    assert "lease-token" not in response.text
+    runtime.knowledge_web.review_audio.assert_awaited_once_with("lease-token")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "web_method", "request_kwargs"),
+    [
+        (
+            "post",
+            "/api/device/knowledge/upload",
+            "review_upload",
+            {"files": {"file": ("knowledge.wav", make_wav(), "audio/wav")}},
+        ),
+        (
+            "get",
+            "/api/device/knowledge/review-audio",
+            "review_audio",
+            {},
+        ),
+    ],
+)
+@pytest.mark.parametrize("lease_token", [None, "wrong-lease"])
+def test_knowledge_audio_routes_reject_missing_or_wrong_lease(
+    method,
+    path,
+    web_method,
+    request_kwargs,
+    lease_token,
+):
+    runtime = FakeRuntime()
+    error_state = knowledge_state(
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+    )
+    runtime.knowledge_web.state.return_value = error_state
+    operation = getattr(runtime.knowledge_web, web_method)
+    operation.side_effect = KnowledgeWebError(
+        "knowledge_lease_expired",
+        "知识补充控制权已过期",
+        409,
+        error_state,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = getattr(client, method)(
+            path,
+            headers=knowledge_headers(lease_token),
+            **request_kwargs,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "knowledge_lease_expired"
+    assert response.json()["knowledge_state"]["control_state"] == "observed"
+    if lease_token is None:
+        runtime.knowledge_web.state.assert_awaited_once_with()
+        operation.assert_not_awaited()
+    elif web_method == "review_upload":
+        operation.assert_awaited_once_with("wrong-lease", make_wav())
+    else:
+        operation.assert_awaited_once_with("wrong-lease")
+
+
+def test_knowledge_upload_rejects_oversized_file_and_closes_upload(monkeypatch):
+    runtime = FakeRuntime()
+    closed_filenames = []
+    original_close = StarletteUploadFile.close
+
+    async def track_close(upload):
+        closed_filenames.append(upload.filename)
+        await original_close(upload)
+
+    monkeypatch.setattr(StarletteUploadFile, "close", track_close)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", b"x" * 1025, "audio/wav")},
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "录音文件过大"}
+    assert "knowledge.wav" in closed_filenames
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+def test_knowledge_upload_keeps_large_wav_in_memory_and_closes_upload(
+    monkeypatch,
+):
+    runtime = FakeRuntime()
+    runtime.device_max_upload_bytes = 2 * 1024 * 1024
+    runtime.knowledge_web.review_upload.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        draft_text="待确认知识",
+    )
+    source = make_wav(frame_count=600_000)
+    created_tempfiles = []
+    original_spooled_tempfile = starlette_formparsers.SpooledTemporaryFile
+
+    def track_spooled_tempfile(*args, **kwargs):
+        tempfile = original_spooled_tempfile(*args, **kwargs)
+        created_tempfiles.append(tempfile)
+        return tempfile
+
+    monkeypatch.setattr(
+        starlette_formparsers,
+        "SpooledTemporaryFile",
+        track_spooled_tempfile,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", source, "audio/wav")},
+        )
+
+    assert 1024 * 1024 < len(source) < runtime.device_max_upload_bytes
+    assert response.status_code == 200
+    assert created_tempfiles
+    assert all(not tempfile._rolled for tempfile in created_tempfiles)
+    assert all(tempfile.closed for tempfile in created_tempfiles)
+    runtime.knowledge_web.review_upload.assert_awaited_once_with(
+        "lease-token",
+        source,
+    )
+
+
+def test_knowledge_upload_rejects_streaming_request_body_over_hard_limit(
+    monkeypatch,
+):
+    runtime = FakeRuntime()
+    boundary = "streaming-boundary"
+    payload = b"x" * (runtime.device_max_upload_bytes + 64 * 1024)
+    preamble = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="knowledge.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+    ).encode()
+    closing = f"\r\n--{boundary}--\r\n".encode()
+    parser_headers = []
+    parser_errors = []
+    created_tempfiles = []
+    read_calls = 0
+    original_parse = MultiPartParser.parse
+    original_read = StarletteUploadFile.read
+    original_spooled_tempfile = starlette_formparsers.SpooledTemporaryFile
+
+    def track_spooled_tempfile(*args, **kwargs):
+        tempfile = original_spooled_tempfile(*args, **kwargs)
+        created_tempfiles.append(tempfile)
+        return tempfile
+
+    async def track_parse(parser):
+        parser_headers.append(parser.headers)
+        try:
+            return await original_parse(parser)
+        except BaseException as error:
+            parser_errors.append(error)
+            raise
+
+    async def track_read(upload, size=-1):
+        nonlocal read_calls
+        read_calls += 1
+        return await original_read(upload, size)
+
+    monkeypatch.setattr(MultiPartParser, "parse", track_parse)
+    monkeypatch.setattr(StarletteUploadFile, "read", track_read)
+    monkeypatch.setattr(
+        starlette_formparsers,
+        "SpooledTemporaryFile",
+        track_spooled_tempfile,
+    )
+
+    async def invoke_streaming_request():
+        chunks = iter([preamble + payload[:1], payload[1:] + closing])
+        messages = []
+
+        async def receive():
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": chunk, "more_body": True}
+
+        async def send(message):
+            messages.append(message)
+
+        await create_app(runtime)(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/device/knowledge/upload",
+                "raw_path": b"/api/device/knowledge/upload",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"x-device-key", DEVICE_KEY.encode()),
+                    (b"x-knowledge-lease", b"lease-token"),
+                    (
+                        b"content-type",
+                        f"multipart/form-data; boundary={boundary}".encode(),
+                    ),
+                ],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+                "root_path": "",
+                "state": {},
+            },
+            receive,
+            send,
+        )
+        return messages
+
+    messages = asyncio.run(invoke_streaming_request())
+    response_start = next(
+        message for message in messages if message["type"] == "http.response.start"
+    )
+
+    assert response_start["status"] == 413
+    assert parser_headers
+    assert "content-length" not in parser_headers[0]
+    assert len(parser_errors) == 1
+    assert isinstance(parser_errors[0], MultiPartException)
+    assert created_tempfiles
+    assert all(tempfile.closed for tempfile in created_tempfiles)
+    assert read_calls == 0
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("headers", "request_kwargs"),
+    [
+        (
+            {"Content-Type": "multipart/form-data"},
+            {"content": b"missing-boundary"},
+        ),
+        (
+            {},
+            {"files": {"other": ("knowledge.wav", make_wav(), "audio/wav")}},
+        ),
+    ],
+    ids=["malformed-multipart", "missing-file"],
+)
+def test_knowledge_upload_rejects_invalid_multipart(headers, request_kwargs):
+    runtime = FakeRuntime()
+    request_headers = knowledge_headers("lease-token")
+    request_headers.update(headers)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=request_headers,
+            **request_kwargs,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "上传表单格式无效"}
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        (
+            KnowledgeWebError(
+                "invalid_audio",
+                "必须上传有效的 WAV 文件",
+                415,
+                knowledge_state(),
+            ),
+            415,
+        ),
+        (
+            KnowledgeWebError(
+                "knowledge_operation_invalid_state",
+                "知识补充模式当前无法处理上传",
+                409,
+                knowledge_state(mode_state=KnowledgeModeState.CONFIRMING),
+            ),
+            409,
+        ),
+    ],
+)
+def test_knowledge_upload_maps_controller_error(error, status_code):
+    runtime = FakeRuntime()
+    runtime.knowledge_web.review_upload.side_effect = error
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == status_code
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["code"] == error.code
+    assert response.json()["detail"] == error.detail
+    assert DEVICE_KEY not in response.text
+    assert "lease-token" not in response.text
+
+
+def test_missing_knowledge_review_audio_maps_controller_error():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.review_audio.side_effect = KnowledgeWebError(
+        "knowledge_review_not_found",
+        "知识复述语音不存在",
+        404,
+        knowledge_state(),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/review-audio",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["code"] == "knowledge_review_not_found"
+    assert response.json()["detail"] == "知识复述语音不存在"
 
 
 @pytest.mark.parametrize(

@@ -3,11 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f5f8ff">
+  <meta name="theme-color" content="#f4f6f8">
   <title>树莓派语音链路测试 · 新智惠想</title>
   <link rel="icon" href="/static/xzinfra-logo.svg">
-  <link rel="stylesheet" href="/static/device-test.css?v=20260821">
-  <script src="/static/device-test.js?v=20260821" defer></script>
+  <link rel="stylesheet" href="/static/device-test.css?v=20260824">
+  <script src="/static/press-gesture.js?v=20260824" defer></script>
+  <script src="/static/device-interaction.js?v=20260824" defer></script>
+  <script src="/static/device-test.js?v=20260824" defer></script>
 </head>
 <body>
   <header class="brand-bar">
@@ -21,7 +23,7 @@
     <header class="page-heading">
       <p class="eyebrow">RASPBERRY PI VOICE PIPELINE</p>
       <h1>树莓派语音链路测试</h1>
-      <p>直接录音或上传标准 WAV，验证识别、知识库回答与语音合成。</p>
+      <p>一个按钮贯穿现场讲解与知识补充，高级工具用于验证标准 WAV 链路。</p>
     </header>
 
     <div class="workspace">
@@ -38,38 +40,31 @@
             <button id="toggle-key" type="button" aria-label="显示设备密钥" aria-pressed="false">显示</button>
           </div>
 
-          <fieldset class="input-method">
-            <legend>输入方式</legend>
-            <div class="mode-switch" role="tablist" aria-label="设备操作方式">
-              <button id="microphone-tab" type="button" role="tab" data-mode="microphone" aria-selected="true" aria-controls="microphone-input" tabindex="0">本机麦克风</button>
-              <button id="wav-tab" type="button" role="tab" data-mode="wav" aria-selected="false" aria-controls="wav-input" tabindex="-1">WAV 文件</button>
-              <button id="knowledge-tab" type="button" role="tab" data-mode="knowledge" aria-selected="false" aria-controls="knowledge-input" tabindex="-1">知识补充</button>
+          <section class="unified-interaction" aria-labelledby="interaction-title" data-mode="dialogue">
+            <div class="interaction-heading">
+              <div>
+                <span id="interaction-title">当前模式</span>
+                <strong id="interaction-mode">正常对话</strong>
+              </div>
+              <span id="interaction-stage">待机</span>
             </div>
-          </fieldset>
-
-          <section class="input-mode-panel microphone-panel" id="microphone-input" role="tabpanel" aria-labelledby="microphone-tab">
-            <button class="record-button" id="local-record" type="button" disabled>
-              <span class="record-indicator" aria-hidden="true"></span>
-              <span id="local-record-label">开始录音</span>
+            <button id="unified-action" class="unified-action" type="button" aria-describedby="gesture-hint" disabled>
+              <svg class="hold-progress" viewBox="0 0 44 44" aria-hidden="true">
+                <circle cx="22" cy="22" r="20" pathLength="1"></circle>
+              </svg>
+              <span class="action-core" aria-hidden="true"><i></i></span>
+              <span id="unified-action-label">短按开始对话</span>
             </button>
-            <p>声音由树莓派默认麦克风采集，回答从默认扬声器播放。</p>
-            <button class="secondary replay-button" id="replay-recording" type="button" disabled>
-              <span class="replay-icon" aria-hidden="true">▶</span>
-              <span id="replay-recording-label">播放刚才的录音</span>
-            </button>
+            <p id="gesture-hint">短按录音，长按 1.5 秒切换模式</p>
+            <p class="device-route">树莓派采集麦克风，回答从默认扬声器播放。</p>
           </section>
 
-          <section class="input-mode-panel wav-panel" id="wav-input" role="tabpanel" aria-labelledby="wav-tab" hidden>
-            <label for="wav-file">测试音频</label>
-            <label class="drop-zone" id="drop-zone" for="wav-file">
-              <input id="wav-file" name="file" type="file" accept=".wav,audio/wav" required>
-              <strong id="file-name">选择或拖放 WAV 文件</strong>
-              <span>16 kHz · 单声道 · 16-bit PCM · 最大 10 MiB</span>
-            </label>
-            <button class="primary wav-submit" id="run-test" type="submit"><span>开始测试</span><b aria-hidden="true">→</b></button>
-          </section>
+          <button class="secondary replay-button" id="replay-recording" type="button" disabled>
+            <span class="replay-icon" aria-hidden="true">▶</span>
+            <span id="replay-recording-label">播放刚才的录音</span>
+          </button>
 
-          <section class="input-mode-panel knowledge-panel" id="knowledge-input" role="tabpanel" aria-labelledby="knowledge-tab" hidden>
+          <section class="knowledge-panel" id="knowledge-context" aria-label="知识补充详情" hidden>
             <div class="knowledge-status-grid" aria-label="知识补充状态">
               <div><span>控制</span><strong id="knowledge-control-state">待校准</strong></div>
               <div><span>模式</span><strong id="knowledge-mode-state">未进入</strong></div>
@@ -86,11 +81,36 @@
               <strong id="knowledge-sync-state">尚无待同步内容</strong>
             </div>
 
-            <div class="knowledge-actions">
-              <button class="secondary" id="knowledge-short-press" type="button" disabled>开始录入</button>
-              <button class="primary" id="knowledge-long-press" type="button" disabled>进入知识补充</button>
-            </div>
           </section>
+
+          <details id="advanced-wav" class="advanced-wav">
+            <summary>
+              <span>高级测试</span>
+              <strong>WAV 文件</strong>
+            </summary>
+            <div class="advanced-wav-body">
+              <div class="wav-purpose" role="group" aria-label="WAV 用途">
+                <button id="wav-purpose-dialogue" type="button" aria-pressed="true">对话测试</button>
+                <button id="wav-purpose-knowledge" type="button" aria-pressed="false">知识补充</button>
+              </div>
+              <label class="drop-zone" id="drop-zone" for="wav-file">
+                <input id="wav-file" name="file" type="file" accept=".wav,audio/wav">
+                <strong id="file-name">选择或拖放 WAV 文件</strong>
+                <span>16 kHz · 单声道 · 16-bit PCM · 最大 10 MiB</span>
+              </label>
+              <button class="primary wav-submit" id="run-test" type="submit"><span>开始对话测试</span><b aria-hidden="true">→</b></button>
+              <div class="wav-review" id="wav-review" hidden>
+                <p>知识复述</p>
+                <p id="wav-review-hint" aria-live="polite">请完整试听复述，播放结束后才能保存。</p>
+                <audio id="wav-knowledge-review" controls preload="none" aria-describedby="wav-review-hint" hidden></audio>
+                <div id="wav-knowledge-actions" class="wav-knowledge-actions" hidden>
+                  <button class="secondary" id="wav-knowledge-discard" type="button">放弃</button>
+                  <button class="secondary" id="wav-knowledge-retry" type="button" hidden>重新获取复述</button>
+                  <button class="knowledge-save" id="wav-knowledge-save" type="button" disabled>保存到知识库</button>
+                </div>
+              </div>
+            </div>
+          </details>
 
           <button class="secondary reset-button" id="reset-device" type="button">重置设备</button>
         </form>

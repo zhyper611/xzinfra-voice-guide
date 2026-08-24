@@ -74,12 +74,13 @@ def test_device_test_page_is_served_without_creating_visitor_session():
     assert response.status_code == 200
     assert "树莓派语音链路测试" in response.text
     assert 'id="device-key"' in response.text
-    assert 'id="local-record"' in response.text
-    assert 'id="local-record-label"' in response.text
+    assert 'id="unified-action"' in response.text
+    assert 'id="interaction-mode"' in response.text
+    assert 'id="interaction-stage"' in response.text
+    assert 'id="gesture-hint"' in response.text
     assert 'id="replay-recording"' in response.text
     assert 'id="replay-recording-label"' in response.text
-    assert 'data-mode="microphone"' in response.text
-    assert 'data-mode="wav"' in response.text
+    assert 'id="advanced-wav"' in response.text
     assert 'id="wav-file"' in response.text
     assert 'id="device-audio"' in response.text
     assert 'id="latency-current-tab"' in response.text
@@ -93,6 +94,41 @@ def test_device_test_page_is_served_without_creating_visitor_session():
     assert 'href="/static/device-test.css?v=' in response.text
     assert 'rel="icon" href="/static/xzinfra-logo.svg"' in response.text
     assert "showroom_session=" not in response.headers.get("set-cookie", "")
+
+
+def test_device_page_uses_unified_button_and_advanced_wav():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        html = client.get("/device-test").text
+
+    required_ids = [
+        "unified-action",
+        "interaction-mode",
+        "interaction-stage",
+        "gesture-hint",
+        "advanced-wav",
+        "wav-purpose-dialogue",
+        "wav-purpose-knowledge",
+        "wav-knowledge-review",
+        "wav-review-hint",
+        "wav-knowledge-actions",
+        "wav-knowledge-discard",
+        "wav-knowledge-retry",
+        "wav-knowledge-save",
+    ]
+    for element_id in required_ids:
+        assert f'id="{element_id}"' in html
+    assert 'id="microphone-tab"' not in html
+    assert 'id="knowledge-tab"' not in html
+
+
+def test_device_page_loads_press_gesture_before_page_script():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        html = client.get("/device-test").text
+
+    assert html.index("press-gesture.js") < html.index("device-interaction.js")
+    assert html.index("device-interaction.js") < html.index("device-test.js")
 
 
 def test_device_test_styles_are_branded_responsive_and_accessible():
@@ -201,16 +237,18 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'latency-stats-tab' in response.text
     assert "localStorage" not in response.text
     assert 'const KNOWLEDGE_LEASE_KEY = "showroom-knowledge-lease"' in response.text
+    assert 'const KNOWLEDGE_DRAFT_SOURCE_KEY = "showroom-knowledge-draft-source"' in response.text
     assert "document.cookie" not in response.text
     assert "innerHTML" not in response.text
     assert "if (!operationPending) clearError()" not in response.text
     assert 'if (error.message === "设备凭证无效") stopPolling()' in response.text
     assert 'currentPhase === "recording"' in response.text
-    assert 'localRecordLabel.textContent = "结束并提交"' in response.text
+    assert "async function runDialogueShortPress()" in response.text
+    assert 'label: "短按结束录音"' in response.text
     assert "snapshot.has_last_recording" in response.text
     assert 'replayRecordingLabel.textContent = "正在播放录音"' in response.text
     assert "URL.createObjectURL(recording" not in response.text
-    assert 'inputMode === "microphone" && currentPhase === "speaking"' in response.text
+    assert 'dialogueSource === "microphone" && currentPhase === "speaking"' in response.text
     assert 'audioHint.textContent = "正在由树莓派扬声器播放"' in response.text
     assert (
         'const NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。"'
@@ -229,17 +267,10 @@ def test_device_test_page_exposes_knowledge_capture_controls():
         response = client.get("/device-test")
 
     assert response.status_code == 200
-    assert 'data-mode="knowledge"' in response.text
-    assert 'id="microphone-tab"' in response.text
-    assert 'id="wav-tab"' in response.text
-    assert 'id="knowledge-tab"' in response.text
-    assert 'aria-labelledby="microphone-tab"' in response.text
-    assert 'aria-labelledby="wav-tab"' in response.text
-    assert 'aria-labelledby="knowledge-tab"' in response.text
-    assert 'tabindex="0"' in response.text
-    assert 'tabindex="-1"' in response.text
-    assert 'aria-controls="knowledge-input"' in response.text
-    assert 'id="knowledge-input"' in response.text
+    assert 'id="unified-action"' in response.text
+    assert 'id="interaction-mode"' in response.text
+    assert 'id="interaction-stage"' in response.text
+    assert 'id="gesture-hint"' in response.text
     assert 'id="knowledge-control-state"' in response.text
     assert 'id="knowledge-mode-state"' in response.text
     assert 'id="knowledge-processing-stage"' in response.text
@@ -247,8 +278,14 @@ def test_device_test_page_exposes_knowledge_capture_controls():
     assert '<output id="knowledge-draft"' in response.text
     assert 'id="knowledge-sync"' in response.text
     assert 'id="knowledge-sync-state"' in response.text
-    assert 'id="knowledge-short-press"' in response.text
-    assert 'id="knowledge-long-press"' in response.text
+    assert 'id="wav-knowledge-review"' in response.text
+    assert 'aria-describedby="wav-review-hint"' in response.text
+    assert 'id="wav-knowledge-discard"' in response.text
+    assert 'id="wav-knowledge-retry"' in response.text
+    assert 'id="wav-knowledge-save"' in response.text
+    assert 'id="microphone-tab"' not in response.text
+    assert 'id="wav-tab"' not in response.text
+    assert 'id="knowledge-tab"' not in response.text
 
 
 def test_device_test_styles_keep_knowledge_controls_stable_and_responsive():
@@ -259,11 +296,18 @@ def test_device_test_styles_keep_knowledge_controls_stable_and_responsive():
     assert response.status_code == 200
     css = response.text.replace("\r\n", "\n")
     assert ".knowledge-status-grid" in css
-    assert ".knowledge-actions" in css
+    assert ".unified-action" in css
+    assert "inline-size: clamp(9rem, 28vw, 11rem);" in css
+    assert "aspect-ratio: 1;" in css
+    assert ".hold-progress circle" in css
+    assert ".unified-action[data-holding=\"true\"]" in css
+    assert "animation: hold-progress var(--hold-duration, 1500ms) linear forwards;" in css
+    assert ".advanced-wav" in css
+    assert ".wav-knowledge-actions" in css
     assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
     assert "#knowledge-draft" in css
     assert '@media (max-width: 599px)' in css
-    assert ".knowledge-actions {\n    grid-template-columns: 1fr;" in css
+    assert ".wav-knowledge-actions {\n    grid-template-columns: 1fr;" in css
     assert "overflow-wrap: anywhere" in css
 
 
@@ -278,16 +322,33 @@ def test_device_test_script_implements_knowledge_lease_and_resync_contract():
     assert "sessionStorage.getItem(KNOWLEDGE_LEASE_KEY)" in script
     assert "sessionStorage.setItem(KNOWLEDGE_LEASE_KEY, knowledgeLeaseToken)" in script
     assert "sessionStorage.removeItem(KNOWLEDGE_LEASE_KEY)" in script
+    assert "createKnowledgeDraftSourceStore" in script
+    assert 'persistKnowledgeDraftSource("wav")' in script
+    assert "resolveKnowledgeDraftTransition" in script
+    assert "persistKnowledgeDraftSource(draftTransition.source)" in script
+    assert "if (draftTransition.invalidateReview) clearKnowledgeReviewAudio()" in script
+    assert "renderAuthoritativeKnowledgeState(snapshot, { captureEntry, shortPress })" in script
+    assert "ShowroomDeviceInteraction.createRequestEpoch()" in script
+    assert "requestEpoch = knowledgeStateEpoch.capture()" in script
+    assert script.count("if (!knowledgeStateEpoch.isCurrent(requestEpoch)) return false;") == 2
+    assert "!allowDuringOperation && (knowledgeOperationPending || operationPending)" in script
+    assert "knowledgeOperationPending || operationPending || document.hidden" in script
+    assert script.count("beginKnowledgeMutation();") >= 4
+    assert "function renderAuthoritativeKnowledgeState(snapshot, options = {})" in script
     assert 'headers.set("X-Knowledge-Lease", knowledgeLeaseToken)' in script
     assert 'knowledgeRequest("/api/device/knowledge/acquire"' in script
     assert 'knowledgeRequest("/api/device/knowledge/state"' in script
-    assert 'runKnowledgeOperation("/api/device/knowledge/short-press"' in script
-    assert 'runKnowledgeOperation("/api/device/knowledge/long-press"' in script
+    assert "/api/device/knowledge/short-press" in script
+    assert "/api/device/knowledge/long-press" in script
     assert 'knowledgeRequest("/api/device/knowledge/release"' in script
-    assert "async function switchInputMode(nextMode)" in script
-    assert 'inputMode === "knowledge" && nextMode !== "knowledge"' in script
+    assert "async function releaseKnowledgeControl()" in script
+    assert "function getUnifiedAction()" in script
+    assert "function updateUnifiedAction()" in script
+    assert 'label: "短按开始对话"' in script
+    assert 'label: "短按录入知识"' in script
+    assert 'label: "短按停止并复述"' in script
+    assert 'label: "长按保存并返回"' in script
     assert 'errorState.control_state !== "owned"' in script
-    assert 'showInputMode("knowledge")' in script
     assert '`/api/device/knowledge/entries/${encodeURIComponent(knowledgeEntryId)}`' in script
     assert "knowledgePollTimer = window.setInterval(refreshKnowledgeState, 2000)" in script
     assert "document.hidden" in script
@@ -299,34 +360,84 @@ def test_device_test_script_implements_knowledge_lease_and_resync_contract():
     assert 'error.code === "knowledge_lease_expired"' in script
     assert "await resyncKnowledgeState({ showFailure: false })" in script
     assert "async function resyncKnowledgeState" in script
-    assert "if (knowledgeOperationPending) return;" in script
-    assert "if (snapshot.last_entry_id)" in script
+    assert "if (knowledgeOperationPending || operationPending) return;" in script
+    assert "ShowroomDeviceInteraction.captureKnowledgeEntry" in script
+    assert "if (entryCapture.capturedEntryId)" in script
     assert 'entry.sync_state === "synced"' in script
     assert 'entry.sync_state === "retrying"' in script
-    assert "knowledgeShortPress.disabled" in script
-    assert "knowledgeLongPress.disabled" in script
-    assert 'knowledgeSnapshot.mode_state === "recording"' in script
-    assert 'knowledgeSnapshot.mode_state === "processing"' in script
-    assert 'knowledgeSnapshot.mode_state !== "inactive"' in script
-    assert "runTest.disabled = operationPending || standardControlsBlocked" in script
-    assert "resetDevice.disabled = operationPending || standardControlsBlocked" in script
-    assert "localRecord.disabled" in script and "standardControlsBlocked" in script
-    assert "replayRecording.disabled" in script and "standardControlsBlocked" in script
-    assert "knowledgeOperationPending || document.hidden" in script
-    assert "button.tabIndex = button.dataset.mode === mode ? 0 : -1" in script
-    assert '["ArrowLeft", "ArrowRight", "Home", "End"]' in script
-    assert "await switchInputMode(nextButton.dataset.mode)" in script
-    assert 'window.addEventListener("beforeunload"' in script
+    assert 'owned && mode === "recording"' in script
+    assert 'mode === "processing"' in script
+    assert 'const knowledgeModeActive = knowledgeMode !== "inactive"' in script
+    assert "runTest.disabled = controlsPending || busy || !keyReady || !wavAllowed" in script
+    assert "resetDevice.disabled = controlsPending || knowledgeModeActive" in script
+    assert "replayRecording.disabled" in script and "knowledgeModeActive" in script
+    assert "knowledgeOperationPending || operationPending || document.hidden" in script
+    assert "ShowroomPressGesture.createPressGesture" in script
+    assert "ShowroomDeviceInteraction.bindUnifiedPress" in script
+    assert "thresholdMs: HOLD_THRESHOLD_MS" in script
+    assert "releaseTarget: window" in script
+    assert 'window.addEventListener("pagehide"' in script
+    assert "keepalive: true" in script
+    assert "unifiedInput.cancel()" in script
+    assert 'payload = await knowledgeRequest(' in script
+    assert '"/api/device/knowledge/upload"' in script
+    upload_handler = script.split("async function submitKnowledgeWav(file)", 1)[1].split(
+        "async function loadKnowledgeReviewAudio", 1
+    )[0]
+    assert "renderAuthoritativeKnowledgeState(payload.knowledge_state);" in upload_handler
+    assert upload_handler.index("beginKnowledgeMutation();") < upload_handler.index(
+        '"/api/device/knowledge/upload"'
+    )
+    assert "captureEntry" not in upload_handler
+    assert "clearKnowledgeLease" not in upload_handler
+    assert "async function knowledgeRawRequest(" in script
+    assert "reviewBlob.size === 0" in script
+    assert "URL.createObjectURL(reviewBlob)" in script
+    assert "wavReviewGate.markLoaded(objectUrl)" in script
+    assert 'wavKnowledgeReview.addEventListener("ended"' in script
+    assert 'wavKnowledgeReview.addEventListener("error"' in script
+    assert "wavReviewGate.markReady(playback.token)" in script
+    assert "wavReviewGate.markFailed(playback.token)" in script
+    assert "deviceKey.disabled = controlsPending" in script
+    assert "toggleKey.disabled = controlsPending" in script
+    assert "wavReviewGate.markReady(objectUrl)" not in script
+    assert 'knowledgeDraftSource !== "microphone" && !wavReviewGate.canSave' in script
+    assert "wavKnowledgeSave.disabled" in script and "!wavReviewGate.canSave" in script
+    assert "retryKnowledgeReviewAudio" in script
+    assert 'wavKnowledgeRetry.addEventListener("click", retryKnowledgeReviewAudio)' in script
+    assert "浏览器未能自动播放复述" in script
+    assert "localRecord" not in script
+    assert "knowledgeShortPress" not in script
+    assert "knowledgeLongPress" not in script
+
+    clear_review_handler = script.split("function clearKnowledgeReviewAudio()", 1)[1].split(
+        "function mountKnowledgeReviewAudio", 1
+    )[0]
+    assert "wavReviewGate.clear()" in clear_review_handler
+    assert "wavReview.hidden = true" in clear_review_handler
+    assert "wavKnowledgeReview.hidden = true" in script
+
+    review_handler = script.split("async function loadKnowledgeReviewAudio()", 1)[1].split(
+        "async function retryKnowledgeReviewAudio", 1
+    )[0]
+    assert "knowledgeRawRequest(" in review_handler
+    assert "knowledgeReviewAudioPath" in review_handler
+
+    retry_handler = script.split("async function retryKnowledgeReviewAudio()", 1)[1].split(
+        "async function submitDialogueWav", 1
+    )[0]
+    assert "await loadKnowledgeReviewAudio()" in retry_handler
+    assert "/api/device/knowledge/upload" not in retry_handler
 
     input_handler = script.split('deviceKey.addEventListener("input"', 1)[1].split(
-        'knowledgeShortPress.addEventListener', 1
+        'wavPurposeDialogue.addEventListener', 1
     )[0]
     assert "startKnowledgePolling()" not in input_handler
     assert "if (!deviceKey.value.trim())" in input_handler
 
     visibility_handler = script.split(
         'document.addEventListener("visibilitychange"', 1
-    )[1].split('window.addEventListener("beforeunload"', 1)[0]
+    )[1].split('window.addEventListener("pagehide"', 1)[0]
     assert visibility_handler.count("startAllPolling();") == 1
     assert "await refreshState" not in visibility_handler
     assert "await refreshKnowledgeState" not in visibility_handler

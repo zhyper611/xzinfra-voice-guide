@@ -7,6 +7,7 @@ from showroom_guide.device import NoSpeechDetected
 from showroom_guide.knowledge_capture import (
     KnowledgeAsrUnavailable,
     KnowledgeCaptureSession,
+    KnowledgeDraft,
     KnowledgeTtsUnavailable,
     normalize_knowledge_text,
 )
@@ -49,6 +50,21 @@ async def test_failed_rerecord_keeps_previous_accepted_draft():
         await session.review(b"second")
 
     assert session.draft_text == "第一版事实。"
+
+
+def test_draft_audio_tracks_accepted_draft_and_clear():
+    session = KnowledgeCaptureSession(AsyncMock(), MagicMock(), MagicMock())
+    draft = KnowledgeDraft("确认后的知识。", b"review-wav")
+
+    assert session.draft_audio is None
+
+    session.accept(draft)
+
+    assert session.draft_audio == b"review-wav"
+
+    session.clear()
+
+    assert session.draft_audio is None
 
 
 @pytest.mark.asyncio
@@ -98,7 +114,9 @@ def test_save_persists_locally_before_waking_background_sync():
     outbox.enqueue.return_value = MagicMock(id="entry-id")
     sync = MagicMock()
     session = KnowledgeCaptureSession(AsyncMock(), outbox, sync)
-    session.accept(MagicMock(text="确认后的知识。", audio=b"wav"))
+    session.accept(KnowledgeDraft(text="确认后的知识。", audio=b"wav"))
+
+    assert session.draft_audio == b"wav"
 
     entry = session.save()
 
@@ -106,3 +124,4 @@ def test_save_persists_locally_before_waking_background_sync():
     sync.wake.assert_called_once_with()
     assert entry.id == "entry-id"
     assert session.has_draft is False
+    assert session.draft_audio is None

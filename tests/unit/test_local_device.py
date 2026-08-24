@@ -10,7 +10,9 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceTurnResult,
     InvalidDeviceAudio,
+    InvalidWavFormat,
     NoSpeechDetected,
+    RecordingTooShort,
 )
 from showroom_guide.local_audio import LocalAudioError, LocalAudioNotRecording
 from showroom_guide.local_device import (
@@ -240,9 +242,10 @@ async def test_short_recording_is_rejected_before_asr():
     with pytest.raises(
         InvalidDeviceAudio,
         match="录音时间太短，请听到开始提示音后再说话",
-    ):
+    ) as caught:
         await workflow.stop_recording()
 
+    assert isinstance(caught.value, RecordingTooShort)
     session.process_recorded_wav.assert_not_awaited()
     audio.play_no_speech_prompt.assert_not_awaited()
     session.fail_recording.assert_awaited_once_with(
@@ -479,7 +482,7 @@ async def test_invalid_capture_does_not_create_last_recording():
     workflow = LocalDeviceWorkflow(session=session, audio=audio)
 
     await workflow.start_recording()
-    with pytest.raises(InvalidDeviceAudio):
+    with pytest.raises(InvalidWavFormat):
         await workflow.stop_recording()
 
     assert workflow.has_last_recording is False

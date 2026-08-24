@@ -21,6 +21,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from showroom_guide.audio_store import AudioNotFound, AudioStore
 from showroom_guide.button_workflow import DeviceButtonWorkflow
@@ -116,6 +118,10 @@ class QuestionRequest(BaseModel):
         return normalized
 
 
+class _KnowledgeUploadTooLarge(MultiPartException):
+    pass
+
+
 class QuestionResponse(BaseModel):
     answer: str
     audio_url: str | None
@@ -146,6 +152,11 @@ class KnowledgeStateResponse(BaseModel):
 class KnowledgeAcquireResponse(BaseModel):
     lease_token: str
     knowledge_state: KnowledgeStateResponse
+
+
+class KnowledgeUploadResponse(BaseModel):
+    knowledge_state: KnowledgeStateResponse
+    review_audio_url: str
 
 
 class KnowledgeEntryResponse(BaseModel):
@@ -463,6 +474,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         return JSONResponse(
             status_code=error.status_code,
             content=payload.model_dump(mode="json"),
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/healthz", include_in_schema=False)
@@ -546,6 +558,61 @@ def create_app(runtime: Runtime) -> FastAPI:
             409,
             state,
         )
+
+    async def read_knowledge_upload(request: Request) -> bytes:
+        request_limit = runtime.device_max_upload_bytes + 64 * 1024
+
+        async def limited_stream() -> AsyncIterator[bytes]:
+            received = 0
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > request_limit:
+                    raise _KnowledgeUploadTooLarge("录音文件过大")
+                yield chunk
+
+        form = None
+        try:
+            parser = MultiPartParser(
+                request.headers,
+                limited_stream(),
+                max_files=1,
+                max_fields=0,
+            )
+            parser.spool_max_size = request_limit
+            parser.max_file_size = request_limit
+            try:
+                form = await parser.parse()
+            except _KnowledgeUploadTooLarge as error:
+                raise HTTPException(
+                    status_code=413,
+                    detail="录音文件过大",
+                ) from error
+            except MultiPartException as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail="上传表单格式无效",
+                ) from error
+            except (KeyError, ValueError) as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail="上传表单格式无效",
+                ) from error
+
+            items = form.multi_items()
+            if (
+                len(items) != 1
+                or items[0][0] != "file"
+                or not isinstance(items[0][1], StarletteUploadFile)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="上传表单格式无效",
+                )
+            upload = items[0][1]
+            return await upload.read(runtime.device_max_upload_bytes + 1)
+        finally:
+            if form is not None:
+                await form.close()
 
     def device_turn_response(result: DeviceTurnResult) -> DeviceTurnResponse:
         audio_url = (
@@ -929,6 +996,43 @@ def create_app(runtime: Runtime) -> FastAPI:
     ) -> KnowledgeStateResponse:
         state = await runtime.knowledge_web.state(lease_token)
         return knowledge_state_response(state)
+
+    @app.post(
+        "/api/device/knowledge/upload",
+        response_model=KnowledgeUploadResponse,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def upload_knowledge(
+        request: Request,
+        response: Response,
+        lease_token: str | None = Depends(knowledge_lease_header),
+    ) -> KnowledgeUploadResponse:
+        token = await require_knowledge_lease(lease_token)
+        audio = await read_knowledge_upload(request)
+        if len(audio) > runtime.device_max_upload_bytes:
+            raise HTTPException(status_code=413, detail="录音文件过大")
+
+        state = await runtime.knowledge_web.review_upload(token, audio)
+        response.headers["Cache-Control"] = "no-store"
+        return KnowledgeUploadResponse(
+            knowledge_state=knowledge_state_response(state),
+            review_audio_url="/api/device/knowledge/review-audio",
+        )
+
+    @app.get(
+        "/api/device/knowledge/review-audio",
+        dependencies=[Depends(require_device_key)],
+    )
+    async def get_knowledge_review_audio(
+        lease_token: str | None = Depends(knowledge_lease_header),
+    ) -> Response:
+        token = await require_knowledge_lease(lease_token)
+        audio = await runtime.knowledge_web.review_audio(token)
+        return Response(
+            content=audio,
+            media_type="audio/wav",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post(
         "/api/device/knowledge/short-press",

@@ -1,12 +1,18 @@
 import asyncio
 import io
 import sqlite3
+import threading
 import wave
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from showroom_guide.device import InvalidDeviceAudio, NoSpeechDetected
+from showroom_guide.device import (
+    InvalidDeviceAudio,
+    NoSpeechDetected,
+    RecordingTooShort,
+    WavMetrics,
+)
 from showroom_guide.knowledge_capture import (
     KnowledgeAsrUnavailable,
     KnowledgeDraft,
@@ -14,6 +20,7 @@ from showroom_guide.knowledge_capture import (
 )
 from showroom_guide.knowledge_mode import (
     KnowledgeLongPressResult,
+    KnowledgeModeInvalidState,
     KnowledgeModeState,
     KnowledgeModeWorkflow,
     KnowledgeProcessingStage,
@@ -52,6 +59,10 @@ class FakeKnowledgeCapture:
     def draft_text(self):
         return self._draft.text if self._draft is not None else None
 
+    @property
+    def draft_audio(self):
+        return self._draft.audio if self._draft is not None else None
+
     def accept(self, draft):
         self.accepted_drafts.append(draft)
         self._draft = draft
@@ -87,6 +98,207 @@ def make_workflow(captured=None, *, max_recording_seconds=60.0):
         max_recording_seconds=max_recording_seconds,
     )
     return workflow, audio, capture
+
+
+@pytest.mark.asyncio
+async def test_review_upload_creates_and_accepts_draft_without_local_playback():
+    workflow, audio, capture = make_workflow()
+    captured = make_wav(seconds=1, sample=4096)
+    await workflow.enter()
+    audio.play_prompt.reset_mock()
+
+    await workflow.review_upload(captured)
+
+    draft = capture.synthesize_review.return_value
+    capture.transcribe.assert_awaited_once_with(captured)
+    capture.synthesize_review.assert_awaited_once_with("确认后的知识。")
+    assert capture.accepted_drafts == [draft]
+    assert workflow.state is KnowledgeModeState.CONFIRMING
+    assert workflow.draft_audio == b"review-wav"
+    audio.play.assert_not_awaited()
+    audio.start_recording.assert_not_awaited()
+    audio.stop_recording.assert_not_awaited()
+    audio.play_start_cue.assert_not_awaited()
+    audio.play_stop_cue.assert_not_awaited()
+    audio.play_no_speech_prompt.assert_not_awaited()
+    audio.play_prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_review_upload_rejects_non_ready_state_without_side_effects():
+    workflow, audio, capture = make_workflow()
+
+    with pytest.raises(KnowledgeModeInvalidState) as caught:
+        await workflow.review_upload(make_wav())
+
+    assert isinstance(caught.value, RuntimeError)
+    assert workflow.state is KnowledgeModeState.INACTIVE
+    assert workflow.processing_stage is None
+    assert capture.accepted_drafts == []
+    capture.transcribe.assert_not_awaited()
+    capture.synthesize_review.assert_not_awaited()
+    audio.play.assert_not_awaited()
+    audio.play_prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "captured", "expected_error"),
+    [
+        ("short", make_wav(seconds=0.1), InvalidDeviceAudio),
+        ("silent", make_wav(sample=0), NoSpeechDetected),
+        ("asr", make_wav(), KnowledgeAsrUnavailable),
+        ("tts", make_wav(), KnowledgeTtsUnavailable),
+    ],
+    ids=["short", "silent", "asr", "tts"],
+)
+async def test_review_upload_failure_restores_ready_without_local_audio(
+    case,
+    captured,
+    expected_error,
+):
+    workflow, audio, capture = make_workflow()
+    if case == "asr":
+        capture.transcribe.side_effect = KnowledgeAsrUnavailable()
+    elif case == "tts":
+        capture.synthesize_review.side_effect = KnowledgeTtsUnavailable()
+    await workflow.enter()
+    audio.play_prompt.reset_mock()
+
+    with pytest.raises(expected_error) as caught:
+        await workflow.review_upload(captured)
+
+    assert workflow.state is KnowledgeModeState.READY
+    assert workflow.processing_stage is None
+    if case == "short":
+        assert isinstance(caught.value, RecordingTooShort)
+    assert capture.accepted_drafts == []
+    assert capture.draft_text is None
+    assert capture.draft_audio is None
+    audio.play.assert_not_awaited()
+    audio.start_recording.assert_not_awaited()
+    audio.stop_recording.assert_not_awaited()
+    audio.play_start_cue.assert_not_awaited()
+    audio.play_stop_cue.assert_not_awaited()
+    audio.play_no_speech_prompt.assert_not_awaited()
+    audio.play_prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_review_upload_inspects_maximum_wav_off_event_loop(monkeypatch):
+    maximum_wav_bytes = 10 * 1024 * 1024
+    captured = make_wav(seconds=(maximum_wav_bytes - 44) / (16000 * 2))
+    assert len(captured) == maximum_wav_bytes
+    event_loop_thread = threading.get_ident()
+    inspection_threads = []
+
+    def inspect_in_worker(audio):
+        assert audio is captured
+        inspection_threads.append(threading.get_ident())
+        return WavMetrics(duration_seconds=1.0, dbfs=-20.0)
+
+    monkeypatch.setattr(
+        "showroom_guide.knowledge_mode.inspect_wav",
+        inspect_in_worker,
+    )
+    workflow, _, capture = make_workflow()
+    await workflow.enter()
+
+    await workflow.review_upload(captured)
+
+    assert len(inspection_threads) == 1
+    assert inspection_threads[0] != event_loop_thread
+    capture.transcribe.assert_awaited_once_with(captured)
+    assert workflow.state is KnowledgeModeState.CONFIRMING
+
+
+@pytest.mark.asyncio
+async def test_microphone_capture_inspects_wav_off_event_loop(monkeypatch):
+    captured = make_wav()
+    event_loop_thread = threading.get_ident()
+    inspection_threads = []
+
+    def inspect_in_worker(audio):
+        assert audio is captured
+        inspection_threads.append(threading.get_ident())
+        return WavMetrics(duration_seconds=1.0, dbfs=-20.0)
+
+    monkeypatch.setattr(
+        "showroom_guide.knowledge_mode.inspect_wav",
+        inspect_in_worker,
+    )
+    workflow, _, capture = make_workflow(captured=captured)
+    await workflow.enter()
+    await workflow.short_press()
+
+    await workflow.short_press()
+
+    assert len(inspection_threads) == 1
+    assert inspection_threads[0] != event_loop_thread
+    capture.transcribe.assert_awaited_once_with(captured)
+    assert workflow.state is KnowledgeModeState.CONFIRMING
+
+
+@pytest.mark.asyncio
+async def test_worker_inspection_error_propagates_and_restores_upload_state(
+    monkeypatch,
+):
+    event_loop_thread = threading.get_ident()
+    inspection_threads = []
+    error = InvalidDeviceAudio("WAV 检查失败")
+
+    def fail_in_worker(_audio):
+        inspection_threads.append(threading.get_ident())
+        raise error
+
+    monkeypatch.setattr(
+        "showroom_guide.knowledge_mode.inspect_wav",
+        fail_in_worker,
+    )
+    workflow, _, capture = make_workflow()
+    await workflow.enter()
+
+    with pytest.raises(InvalidDeviceAudio, match="WAV 检查失败") as caught:
+        await workflow.review_upload(make_wav())
+
+    assert caught.value is error
+    assert len(inspection_threads) == 1
+    assert inspection_threads[0] != event_loop_thread
+    assert workflow.state is KnowledgeModeState.READY
+    assert workflow.processing_stage is None
+    capture.transcribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_inspection_error_preserves_confirming_fallback(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    inspection_threads = []
+    error = InvalidDeviceAudio("WAV 检查失败")
+
+    def fail_in_worker(_audio):
+        inspection_threads.append(threading.get_ident())
+        raise error
+
+    monkeypatch.setattr(
+        "showroom_guide.knowledge_mode.inspect_wav",
+        fail_in_worker,
+    )
+    workflow, _, capture = make_workflow()
+    await workflow.enter()
+    old_draft = KnowledgeDraft("旧草稿。", b"old-review-wav")
+    capture.accept(old_draft)
+    await workflow.short_press()
+
+    with pytest.raises(InvalidDeviceAudio, match="WAV 检查失败") as caught:
+        await workflow.short_press()
+
+    assert caught.value is error
+    assert len(inspection_threads) == 1
+    assert inspection_threads[0] != event_loop_thread
+    assert workflow.state is KnowledgeModeState.CONFIRMING
+    assert workflow.processing_stage is None
+    assert capture._draft is old_draft
+    capture.transcribe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -164,7 +376,7 @@ async def test_short_recording_is_rejected_without_spoken_error():
     await workflow.enter()
     await workflow.short_press()
 
-    with pytest.raises(InvalidDeviceAudio, match="太短"):
+    with pytest.raises(RecordingTooShort, match="太短"):
         await workflow.short_press()
 
     assert workflow.state is KnowledgeModeState.READY

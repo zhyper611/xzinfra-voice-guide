@@ -1,19 +1,28 @@
 const deviceForm = document.querySelector("#device-form");
 const deviceKey = document.querySelector("#device-key");
 const toggleKey = document.querySelector("#toggle-key");
-const modeButtons = [...document.querySelectorAll("[data-mode]")];
-const microphoneInput = document.querySelector("#microphone-input");
-const wavInput = document.querySelector("#wav-input");
-const knowledgeInput = document.querySelector("#knowledge-input");
-const localRecord = document.querySelector("#local-record");
-const localRecordLabel = document.querySelector("#local-record-label");
+const unifiedInteraction = document.querySelector(".unified-interaction");
+const interactionMode = document.querySelector("#interaction-mode");
+const interactionStage = document.querySelector("#interaction-stage");
+const unifiedAction = document.querySelector("#unified-action");
+const unifiedActionLabel = document.querySelector("#unified-action-label");
 const replayRecording = document.querySelector("#replay-recording");
 const replayRecordingLabel = document.querySelector("#replay-recording-label");
+const advancedWav = document.querySelector("#advanced-wav");
+const wavPurposeDialogue = document.querySelector("#wav-purpose-dialogue");
+const wavPurposeKnowledge = document.querySelector("#wav-purpose-knowledge");
 const wavFile = document.querySelector("#wav-file");
 const dropZone = document.querySelector("#drop-zone");
 const fileName = document.querySelector("#file-name");
 const runTest = document.querySelector("#run-test");
 const runTestLabel = runTest.querySelector("span");
+const wavReview = document.querySelector("#wav-review");
+const wavKnowledgeReview = document.querySelector("#wav-knowledge-review");
+const wavReviewHint = document.querySelector("#wav-review-hint");
+const wavKnowledgeActions = document.querySelector("#wav-knowledge-actions");
+const wavKnowledgeDiscard = document.querySelector("#wav-knowledge-discard");
+const wavKnowledgeRetry = document.querySelector("#wav-knowledge-retry");
+const wavKnowledgeSave = document.querySelector("#wav-knowledge-save");
 const resetDevice = document.querySelector("#reset-device");
 const deviceError = document.querySelector("#device-error");
 const phasePill = document.querySelector("#phase-pill");
@@ -42,8 +51,7 @@ const knowledgeProcessingStage = document.querySelector("#knowledge-processing-s
 const knowledgeDraft = document.querySelector("#knowledge-draft");
 const knowledgeSync = document.querySelector("#knowledge-sync");
 const knowledgeSyncState = document.querySelector("#knowledge-sync-state");
-const knowledgeShortPress = document.querySelector("#knowledge-short-press");
-const knowledgeLongPress = document.querySelector("#knowledge-long-press");
+const knowledgeContext = document.querySelector("#knowledge-context");
 
 const phaseLabels = {
   idle: "待机",
@@ -56,8 +64,12 @@ const phaseLabels = {
 };
 const NO_SPEECH_MESSAGE = "没有听清您的声音，请靠近麦克风后再试一次。";
 const REQUEST_TIMEOUT_MS = 180000;
+const TURN_REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 const STATUS_REQUEST_TIMEOUT_MS = 15000;
+const HOLD_THRESHOLD_MS = 1500;
 const KNOWLEDGE_LEASE_KEY = "showroom-knowledge-lease";
+const KNOWLEDGE_DRAFT_SOURCE_KEY = "showroom-knowledge-draft-source";
+const KNOWLEDGE_REVIEW_AUDIO_PATH = "/api/device/knowledge/review-audio";
 
 let audioObjectUrl = null;
 let pollTimer = null;
@@ -69,7 +81,8 @@ let metricsRequestGeneration = null;
 let metricsRequestId = 0;
 let operationPending = false;
 let currentPhase = "idle";
-let inputMode = "microphone";
+let dialogueSource = "microphone";
+let wavPurpose = "dialogue";
 let localPlaybackActive = false;
 let hasLastRecording = false;
 let replayPending = false;
@@ -85,14 +98,33 @@ let knowledgeEntryId = null;
 let knowledgeLastEntryId = null;
 let knowledgeSnapshot = null;
 let knowledgeLeaseToken = null;
+let knowledgeDraftSource = null;
 let knowledgeOperationNeedsResync = false;
 let deviceKeyGeneration = 0;
+let knowledgeReviewAudioPath = null;
+let knowledgeReviewPlayback = null;
+let unifiedGesture = null;
+let unifiedInput = null;
+
+const wavReviewGate = ShowroomDeviceInteraction.createWavReviewGate({
+  revokeObjectUrl: (objectUrl) => URL.revokeObjectURL(objectUrl),
+});
+const knowledgeDraftSourceStore = ShowroomDeviceInteraction.createKnowledgeDraftSourceStore({
+  storage: {
+    getItem: (key) => sessionStorage.getItem(key),
+    setItem: (key, value) => sessionStorage.setItem(key, value),
+    removeItem: (key) => sessionStorage.removeItem(key),
+  },
+  key: KNOWLEDGE_DRAFT_SOURCE_KEY,
+});
+const knowledgeStateEpoch = ShowroomDeviceInteraction.createRequestEpoch();
 
 try {
   knowledgeLeaseToken = sessionStorage.getItem(KNOWLEDGE_LEASE_KEY);
 } catch {
   knowledgeLeaseToken = null;
 }
+knowledgeDraftSource = knowledgeDraftSourceStore.read(knowledgeLeaseToken);
 
 const outcomeLabels = {
   success: "成功",
@@ -249,7 +281,46 @@ async function knowledgeRequest(path, options = {}, timeoutMs = REQUEST_TIMEOUT_
   }
 }
 
+async function knowledgeRawRequest(
+  path,
+  options = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  requestKey = null,
+) {
+  const key = requestKey === null ? requireKey() : requestKey;
+  if (!key) throw new Error("请输入设备密钥");
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Device-Key", key);
+  if (knowledgeLeaseToken) {
+    headers.set("X-Knowledge-Lease", knowledgeLeaseToken);
+  }
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok) throw await knowledgeResponseError(response);
+    return response;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("知识补充操作超时，正在校准设备状态");
+      timeoutError.code = "knowledge_timeout";
+      timeoutError.payload = null;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 function persistKnowledgeLease(token) {
+  if (knowledgeLeaseToken && knowledgeLeaseToken !== token) {
+    clearKnowledgeDraftSource();
+  }
   knowledgeLeaseToken = token;
   try {
     sessionStorage.setItem(KNOWLEDGE_LEASE_KEY, knowledgeLeaseToken);
@@ -258,8 +329,29 @@ function persistKnowledgeLease(token) {
   }
 }
 
+function persistKnowledgeDraftSource(source) {
+  knowledgeDraftSource = source === "wav" || source === "microphone"
+    ? source
+    : "unknown";
+  try {
+    knowledgeDraftSourceStore.write(knowledgeLeaseToken, knowledgeDraftSource);
+  } catch {
+    knowledgeDraftSource = source === "microphone" ? "microphone" : "unknown";
+  }
+}
+
+function clearKnowledgeDraftSource() {
+  knowledgeDraftSource = null;
+  try {
+    knowledgeDraftSourceStore.clear();
+  } catch {
+    knowledgeDraftSource = null;
+  }
+}
+
 function clearKnowledgeLease() {
   knowledgeLeaseToken = null;
+  clearKnowledgeDraftSource();
   try {
     sessionStorage.removeItem(KNOWLEDGE_LEASE_KEY);
   } catch {
@@ -283,47 +375,121 @@ function showKnowledgeError(error) {
     : error.message || "知识补充请求失败，请稍后重试";
 }
 
-function updateKnowledgeControls() {
-  const snapshot = knowledgeSnapshot;
-  const keyReady = Boolean(deviceKey.value.trim());
-  const enabled = snapshot ? snapshot.enabled !== false : false;
-  const owned = snapshot && snapshot.control_state === "owned" && Boolean(knowledgeLeaseToken);
-  const observed = snapshot && snapshot.control_state === "observed";
-  const mode = snapshot ? snapshot.mode_state : "inactive";
+function getUnifiedAction() {
+  const mode = knowledgeSnapshot?.mode_state || "inactive";
+  const owned = knowledgeSnapshot?.control_state === "owned" && Boolean(knowledgeLeaseToken);
+  const observed = knowledgeSnapshot?.control_state === "observed";
+  const knowledgeShort = () => runKnowledgeOperation("/api/device/knowledge/short-press");
+  const knowledgeLong = () => runKnowledgeOperation(
+    "/api/device/knowledge/long-press",
+    { captureEntry: mode === "confirming" },
+  );
 
-  knowledgeShortPress.textContent = "开始录入";
-  knowledgeLongPress.textContent = "进入知识补充";
-  knowledgeShortPress.disabled = true;
-  knowledgeLongPress.disabled = true;
-
-  if (!keyReady || !enabled || observed || knowledgeOperationPending) return;
-  if (!owned) {
-    knowledgeLongPress.disabled = false;
-    return;
+  if (operationPending || knowledgeOperationPending) {
+    return { short: null, long: null, label: "正在处理" };
   }
-
-  if (mode === "ready") {
-    knowledgeShortPress.disabled = false;
-    knowledgeLongPress.disabled = false;
-    knowledgeLongPress.textContent = "退出知识模式";
-  } else if (mode === "recording") {
-    knowledgeShortPress.disabled = false;
-    knowledgeShortPress.textContent = "停止并复述";
-    knowledgeLongPress.textContent = "复述准备中";
-  } else if (mode === "processing") {
-    knowledgeShortPress.textContent = "处理中";
-    knowledgeLongPress.textContent = "处理中";
-  } else if (mode === "confirming") {
-    knowledgeShortPress.disabled = false;
-    knowledgeLongPress.disabled = false;
-    knowledgeShortPress.textContent = "重新录入";
-    knowledgeLongPress.textContent = "保存并返回";
+  if (mode === "processing" || (observed && mode !== "inactive")) {
+    return {
+      short: null,
+      long: null,
+      label: observed ? "知识补充已被占用" : "正在处理",
+    };
   }
+  if (mode !== "inactive" && !owned) {
+    return { short: null, long: null, label: "正在校准知识模式" };
+  }
+  if (owned && mode === "ready") {
+    return { short: knowledgeShort, long: knowledgeLong, label: "短按录入知识" };
+  }
+  if (owned && mode === "recording") {
+    return { short: knowledgeShort, long: null, label: "短按停止并复述" };
+  }
+  if (owned && mode === "confirming") {
+    if (knowledgeDraftSource !== "microphone" && !wavReviewGate.canSave) {
+      return {
+        short: knowledgeShort,
+        long: null,
+        label: wavReviewGate.state === "loading"
+          ? "正在获取复述"
+          : (wavReviewGate.state === "loaded" ? "请完整试听复述" : "复述未就绪，短按重录"),
+      };
+    }
+    return { short: knowledgeShort, long: knowledgeLong, label: "长按保存并返回" };
+  }
+  if (currentPhase === "recording") {
+    return { short: runDialogueShortPress, long: null, label: "短按结束录音" };
+  }
+  if (["transcribing", "thinking", "speaking"].includes(currentPhase)) {
+    return { short: null, long: null, label: "正在处理" };
+  }
+  return {
+    short: runDialogueShortPress,
+    long: knowledgeSnapshot?.enabled === false ? null : acquireKnowledgeControl,
+    label: "短按开始对话",
+  };
 }
 
-function renderKnowledgeState(snapshot, { captureEntry = false } = {}) {
+function updateUnifiedAction() {
+  const action = getUnifiedAction();
+  const mode = knowledgeSnapshot?.mode_state || "inactive";
+  const knowledgeActive = mode !== "inactive";
+  const keyReady = Boolean(deviceKey.value.trim());
+  const disabled = !keyReady || (!action.short && !action.long);
+
+  unifiedActionLabel.textContent = action.label;
+  unifiedAction.dataset.state = knowledgeActive ? mode : currentPhase;
+  unifiedInteraction.dataset.mode = knowledgeActive ? "knowledge" : "dialogue";
+  interactionMode.textContent = knowledgeActive ? "知识补充" : "正常对话";
+  interactionStage.textContent = knowledgeActive
+    ? (knowledgeStageLabels[knowledgeSnapshot?.processing_stage]
+      || knowledgeModeLabels[mode]
+      || "待机")
+    : (phaseLabels[currentPhase] || "处理中");
+  knowledgeContext.hidden = !(knowledgeActive || knowledgeEntryId);
+  unifiedInput.setDisabled(disabled);
+}
+
+function renderKnowledgeState(
+  snapshot,
+  { captureEntry = false, shortPress = false } = {},
+) {
+  const previousMode = knowledgeSnapshot?.mode_state || null;
+  const previousSource = knowledgeDraftSource;
   knowledgeSnapshot = snapshot;
   const owned = snapshot.control_state === "owned" && Boolean(knowledgeLeaseToken);
+  const draftTransition = ShowroomDeviceInteraction.resolveKnowledgeDraftTransition({
+    source: previousSource,
+    previousMode,
+    nextMode: snapshot.mode_state,
+    shortPress,
+  });
+  if (draftTransition.invalidateReview) clearKnowledgeReviewAudio();
+  if (draftTransition.source !== previousSource) {
+    if (owned && draftTransition.source) {
+      persistKnowledgeDraftSource(draftTransition.source);
+    } else {
+      clearKnowledgeDraftSource();
+    }
+  }
+  const hadReviewDraft = wavReviewGate.hasDraft;
+  const reviewRequired = ShowroomDeviceInteraction.rehydrateKnowledgeReview({
+    source: knowledgeDraftSource,
+    owned,
+    modeState: snapshot.mode_state,
+    gate: wavReviewGate,
+  });
+  if (reviewRequired && !hadReviewDraft) {
+    persistKnowledgeDraftSource(knowledgeDraftSource || "unknown");
+    knowledgeReviewAudioPath = KNOWLEDGE_REVIEW_AUDIO_PATH;
+    wavPurpose = "knowledge";
+    wavPurposeDialogue.setAttribute("aria-pressed", "false");
+    wavPurposeKnowledge.setAttribute("aria-pressed", "true");
+    advancedWav.open = true;
+    resetKnowledgeReviewPlayer();
+    wavReview.hidden = false;
+    wavKnowledgeActions.hidden = false;
+    wavKnowledgeRetry.hidden = false;
+  }
   knowledgeControlState.textContent = knowledgeControlLabels[snapshot.control_state] || "待校准";
   knowledgeModeState.textContent = knowledgeModeLabels[snapshot.mode_state] || "未知";
   knowledgeProcessingStage.textContent = knowledgeStageLabels[snapshot.processing_stage] || "--";
@@ -331,16 +497,17 @@ function renderKnowledgeState(snapshot, { captureEntry = false } = {}) {
     ? snapshot.draft_text
     : "等待录入";
 
-  if (snapshot.last_entry_id) {
-    const isNewEntry = snapshot.last_entry_id !== knowledgeLastEntryId;
-    knowledgeLastEntryId = snapshot.last_entry_id;
-    if (captureEntry && isNewEntry) {
-      knowledgeEntryId = snapshot.last_entry_id;
-      clearKnowledgeLease();
-    }
+  const entryCapture = ShowroomDeviceInteraction.captureKnowledgeEntry({
+    captureEntry,
+    lastEntryId: snapshot.last_entry_id,
+    previousLastEntryId: knowledgeLastEntryId,
+  });
+  knowledgeLastEntryId = entryCapture.nextLastEntryId;
+  if (entryCapture.capturedEntryId) {
+    knowledgeEntryId = entryCapture.capturedEntryId;
+    clearKnowledgeLease();
   }
-  updateKnowledgeControls();
-  updateLocalRecordControl();
+  updateControls();
 }
 
 function renderKnowledgeEntry(entry) {
@@ -355,7 +522,10 @@ function renderKnowledgeEntry(entry) {
 }
 
 function handleKnowledgeError(error, { showFailure = true, captureEntry = false } = {}) {
-  if (error.code === "knowledge_lease_expired") clearKnowledgeLease();
+  if (error.code === "knowledge_lease_expired") {
+    clearKnowledgeLease();
+    clearKnowledgeReviewAudio();
+  }
   const errorState = error.payload && error.payload.knowledge_state;
   if (errorState) renderKnowledgeState(errorState, { captureEntry });
   if (error.message === "设备凭证无效") stopAllPolling();
@@ -373,7 +543,7 @@ function renderState(snapshot) {
   statusMessage.textContent = snapshot.message || "设备状态已更新";
   transcript.textContent = snapshot.transcript || "尚未识别";
   answer.textContent = snapshot.answer || "回答会显示在这里";
-  if (inputMode === "microphone" && currentPhase === "speaking") {
+  if (dialogueSource === "microphone" && currentPhase === "speaking") {
     localPlaybackActive = true;
     audioHint.textContent = "正在由树莓派扬声器播放";
   }
@@ -384,7 +554,7 @@ function renderState(snapshot) {
     audioHint.textContent = "树莓派扬声器播放失败";
     localPlaybackActive = false;
   }
-  updateLocalRecordControl();
+  updateControls();
 }
 
 function clearAudio() {
@@ -398,6 +568,88 @@ function clearAudio() {
   }
 }
 
+function beginKnowledgeMutation() {
+  knowledgeStateEpoch.bump();
+}
+
+function renderAuthoritativeKnowledgeState(snapshot, options = {}) {
+  knowledgeStateEpoch.bump();
+  renderKnowledgeState(snapshot, options);
+}
+
+function resetKnowledgeReviewPlayer() {
+  knowledgeReviewPlayback = null;
+  wavKnowledgeReview.pause();
+  wavKnowledgeReview.hidden = true;
+  wavKnowledgeReview.removeAttribute("src");
+  wavKnowledgeReview.load();
+}
+
+function clearKnowledgeReviewAudio() {
+  resetKnowledgeReviewPlayer();
+  wavKnowledgeActions.hidden = true;
+  wavKnowledgeRetry.hidden = true;
+  wavReview.hidden = true;
+  knowledgeReviewAudioPath = null;
+  wavReviewGate.clear();
+}
+
+function mountKnowledgeReviewAudio(objectUrl, token) {
+  resetKnowledgeReviewPlayer();
+  knowledgeReviewPlayback = { objectUrl, token };
+  wavKnowledgeReview.src = objectUrl;
+  wavKnowledgeReview.hidden = false;
+  wavKnowledgeActions.hidden = false;
+  wavKnowledgeRetry.hidden = true;
+  wavReview.hidden = false;
+  wavReviewHint.textContent = "请完整试听复述，播放结束后才能保存。";
+  wavKnowledgeReview.load();
+}
+
+function handleKnowledgeReviewEnded() {
+  const playback = knowledgeReviewPlayback;
+  if (
+    !playback
+    || wavKnowledgeReview.getAttribute("src") !== playback.objectUrl
+    || !wavKnowledgeReview.ended
+    || !wavReviewGate.markReady(playback.token)
+  ) return;
+  wavReviewHint.textContent = "复述已完整试听，可以保存到知识库。";
+  clearError();
+  updateControls();
+}
+
+function handleKnowledgeReviewError() {
+  const playback = knowledgeReviewPlayback;
+  if (
+    !playback
+    || wavKnowledgeReview.getAttribute("src") !== playback.objectUrl
+    || !wavKnowledgeReview.error
+    || !wavReviewGate.markFailed(playback.token)
+  ) return;
+  resetKnowledgeReviewPlayer();
+  wavKnowledgeRetry.hidden = false;
+  wavReviewHint.textContent = "复述播放失败，请重新获取后再试听。";
+  showKnowledgePlaybackWarning("复述音频播放失败，请重新获取后再试。");
+  updateControls();
+}
+
+function showKnowledgePlaybackWarning(message, { audioReady = false } = {}) {
+  deviceError.textContent = message;
+  wavKnowledgeReview.hidden = !audioReady;
+  wavKnowledgeActions.hidden = false;
+  wavReview.hidden = false;
+}
+
+function setWavPurpose(purpose) {
+  wavPurpose = purpose;
+  const isDialogue = purpose === "dialogue";
+  wavPurposeDialogue.setAttribute("aria-pressed", String(isDialogue));
+  wavPurposeKnowledge.setAttribute("aria-pressed", String(!isDialogue));
+  wavReview.hidden = isDialogue || !wavReviewGate.hasDraft;
+  updateControls();
+}
+
 function clearResult() {
   clearAudio();
   transcript.textContent = "尚未识别";
@@ -408,78 +660,57 @@ function clearResult() {
 
 function setOperationPending(pending) {
   operationPending = pending;
-  runTest.disabled = pending;
-  resetDevice.disabled = pending;
-  runTestLabel.textContent = pending ? "正在处理" : "开始测试";
-  updateLocalRecordControl();
-  updateKnowledgeControls();
+  updateControls();
 }
 
-function updateLocalRecordControl() {
+function updateControls() {
   const keyReady = Boolean(deviceKey.value.trim());
   const processing = ["transcribing", "thinking", "speaking"].includes(currentPhase);
   const busy = currentPhase === "recording" || processing;
-  const knowledgeModeActive = (
-    knowledgeSnapshot
-    && knowledgeSnapshot.mode_state !== "inactive"
+  const knowledgeMode = knowledgeSnapshot?.mode_state || "inactive";
+  const knowledgeModeActive = knowledgeMode !== "inactive";
+  const ownedKnowledgeReady = (
+    knowledgeSnapshot?.control_state === "owned"
+    && Boolean(knowledgeLeaseToken)
+    && knowledgeMode === "ready"
   );
-  const standardControlsBlocked = Boolean(knowledgeModeActive || knowledgeOperationPending);
-  const knowledgeModeBusy = knowledgeSnapshot && (
-    knowledgeSnapshot.mode_state === "recording"
-    || knowledgeSnapshot.mode_state === "processing"
-  );
-  for (const button of modeButtons) {
-    button.disabled = (
-      operationPending
-      || knowledgeOperationPending
-      || currentPhase === "recording"
-      || processing
-      || (
-        knowledgeModeBusy
-        && button.dataset.mode !== "knowledge"
-        && button.dataset.mode !== inputMode
-      )
-    );
-  }
-  runTest.disabled = operationPending || standardControlsBlocked;
-  resetDevice.disabled = operationPending || standardControlsBlocked;
-  localRecord.dataset.recording = String(currentPhase === "recording");
-  localRecord.disabled = operationPending || processing || !keyReady || standardControlsBlocked;
-  if (operationPending) {
-    localRecordLabel.textContent = "正在处理";
-  } else if (currentPhase === "recording") {
-    localRecordLabel.textContent = "结束并提交";
-  } else {
-    localRecordLabel.textContent = "开始录音";
-  }
+  const controlsPending = operationPending || knowledgeOperationPending;
+  const wavAllowed = wavPurpose === "knowledge"
+    ? (!knowledgeModeActive || ownedKnowledgeReady)
+    : !knowledgeModeActive;
+
+  deviceKey.disabled = controlsPending;
+  toggleKey.disabled = controlsPending;
+  runTest.disabled = controlsPending || busy || !keyReady || !wavAllowed;
+  resetDevice.disabled = controlsPending || knowledgeModeActive;
+  runTestLabel.textContent = operationPending
+    ? "正在处理"
+    : (wavPurpose === "knowledge" ? "生成知识复述" : "开始对话测试");
+  wavPurposeDialogue.disabled = controlsPending || busy;
+  wavPurposeKnowledge.disabled = controlsPending || busy;
   replayRecording.disabled = (
-    operationPending
+    controlsPending
     || replayPending
     || busy
     || !keyReady
     || !hasLastRecording
-    || standardControlsBlocked
+    || knowledgeModeActive
   );
   if (replayPending) {
     replayRecordingLabel.textContent = "正在播放录音";
   } else {
     replayRecordingLabel.textContent = "播放刚才的录音";
   }
-}
-
-function showInputMode(mode) {
-  inputMode = mode;
-  microphoneInput.hidden = mode !== "microphone";
-  wavInput.hidden = mode !== "wav";
-  knowledgeInput.hidden = mode !== "knowledge";
-  for (const button of modeButtons) {
-    const selected = button.dataset.mode === mode;
-    button.setAttribute("aria-selected", String(selected));
-    button.tabIndex = button.dataset.mode === mode ? 0 : -1;
-  }
-  if (mode === "knowledge" && deviceKey.value.trim()) {
-    refreshKnowledgeState({ showFailure: true });
-  }
+  const wavConfirming = (
+    knowledgeMode === "confirming"
+    && Boolean(knowledgeLeaseToken)
+    && wavReviewGate.hasDraft
+  );
+  wavKnowledgeDiscard.disabled = controlsPending || !wavConfirming;
+  wavKnowledgeRetry.hidden = !(wavConfirming && wavReviewGate.state === "failed");
+  wavKnowledgeRetry.disabled = controlsPending || wavReviewGate.state !== "failed";
+  wavKnowledgeSave.disabled = controlsPending || !wavConfirming || !wavReviewGate.canSave;
+  updateUnifiedAction();
 }
 
 async function renderTurnResult(payload, { localPlayback = false } = {}) {
@@ -581,17 +812,20 @@ async function loadKnowledgeState({
   allowDuringOperation = false,
   requestGeneration,
   requestKey,
+  requestEpoch = knowledgeStateEpoch.capture(),
 } = {}) {
   const captureEntry = knowledgeOperationNeedsResync;
   try {
     const snapshot = await knowledgeRequest("/api/device/knowledge/state", {}, STATUS_REQUEST_TIMEOUT_MS, requestKey);
     if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return false;
-    if (!allowDuringOperation && knowledgeOperationPending) return false;
+    if (!knowledgeStateEpoch.isCurrent(requestEpoch)) return false;
+    if (!allowDuringOperation && (knowledgeOperationPending || operationPending)) return false;
     renderKnowledgeState(snapshot, { captureEntry });
     knowledgeOperationNeedsResync = false;
   } catch (error) {
     if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return false;
-    if (!allowDuringOperation && knowledgeOperationPending) return false;
+    if (!knowledgeStateEpoch.isCurrent(requestEpoch)) return false;
+    if (!allowDuringOperation && (knowledgeOperationPending || operationPending)) return false;
     handleKnowledgeError(error, { showFailure, captureEntry });
     if (error.payload && error.payload.knowledge_state) {
       knowledgeOperationNeedsResync = false;
@@ -609,9 +843,10 @@ async function refreshKnowledgeState({ showFailure = false } = {}) {
       knowledgeStateRequestPending
       && knowledgeStateRequestGeneration === requestGeneration
     )
-    || knowledgeOperationPending || document.hidden
+    || knowledgeOperationPending || operationPending || document.hidden
   ) return;
   const requestId = ++knowledgeStateRequestId;
+  const requestEpoch = knowledgeStateEpoch.capture();
   knowledgeStateRequestPending = true;
   knowledgeStateRequestGeneration = requestGeneration;
   try {
@@ -619,8 +854,9 @@ async function refreshKnowledgeState({ showFailure = false } = {}) {
       showFailure,
       requestGeneration,
       requestKey,
+      requestEpoch,
     });
-    if (knowledgeOperationPending) return;
+    if (knowledgeOperationPending || operationPending) return;
     if (applied) await refreshKnowledgeEntry({ showFailure });
   } finally {
     if (requestId === knowledgeStateRequestId) {
@@ -635,6 +871,7 @@ async function resyncKnowledgeState({ showFailure = false } = {}) {
   const requestKey = deviceKey.value.trim();
   if (!requestKey) return;
   const requestId = ++knowledgeStateRequestId;
+  const requestEpoch = knowledgeStateEpoch.capture();
   knowledgeStateRequestPending = true;
   knowledgeStateRequestGeneration = requestGeneration;
   try {
@@ -643,6 +880,7 @@ async function resyncKnowledgeState({ showFailure = false } = {}) {
       allowDuringOperation: true,
       requestGeneration,
       requestKey,
+      requestEpoch,
     });
     if (applied) await refreshKnowledgeEntry({ showFailure });
   } finally {
@@ -861,17 +1099,19 @@ function updateSelectedFile(files) {
 
 function setKnowledgeOperationPending(pending) {
   knowledgeOperationPending = pending;
-  updateKnowledgeControls();
-  updateLocalRecordControl();
+  updateControls();
 }
 
 async function acquireKnowledgeControl() {
   clearError();
   setKnowledgeOperationPending(true);
+  beginKnowledgeMutation();
+  let acquired = false;
   try {
     const payload = await knowledgeRequest("/api/device/knowledge/acquire", { method: "POST" });
     persistKnowledgeLease(payload.lease_token);
-    renderKnowledgeState(payload.knowledge_state);
+    renderAuthoritativeKnowledgeState(payload.knowledge_state);
+    acquired = true;
   } catch (error) {
     handleKnowledgeError(error);
     if (error.code === "knowledge_timeout") {
@@ -882,15 +1122,18 @@ async function acquireKnowledgeControl() {
     setKnowledgeOperationPending(false);
     startKnowledgePolling();
   }
+  return acquired;
 }
 
 async function runKnowledgeOperation(path, { captureEntry = false } = {}) {
+  const shortPress = path === "/api/device/knowledge/short-press";
   clearError();
   setKnowledgeOperationPending(true);
+  beginKnowledgeMutation();
   try {
     const snapshot = await knowledgeRequest(path, { method: "POST" });
     if (snapshot.control_state !== "owned") clearKnowledgeLease();
-    renderKnowledgeState(snapshot, { captureEntry });
+    renderAuthoritativeKnowledgeState(snapshot, { captureEntry, shortPress });
     if (captureEntry && knowledgeEntryId) await refreshKnowledgeEntry({ showFailure: true });
   } catch (error) {
     handleKnowledgeError(error);
@@ -904,20 +1147,20 @@ async function runKnowledgeOperation(path, { captureEntry = false } = {}) {
   }
 }
 
-async function switchInputMode(nextMode) {
-  const leavingKnowledge = inputMode === "knowledge" && nextMode !== "knowledge";
-  if (!leavingKnowledge || !knowledgeLeaseToken) {
-    showInputMode(nextMode);
+async function releaseKnowledgeControl() {
+  if (!knowledgeLeaseToken) {
+    clearKnowledgeReviewAudio();
+    await refreshKnowledgeState({ showFailure: false });
     return;
   }
-
   clearError();
   setKnowledgeOperationPending(true);
+  beginKnowledgeMutation();
   try {
     const snapshot = await knowledgeRequest("/api/device/knowledge/release", { method: "POST" });
     clearKnowledgeLease();
-    renderKnowledgeState(snapshot);
-    showInputMode(nextMode);
+    clearKnowledgeReviewAudio();
+    renderAuthoritativeKnowledgeState(snapshot);
   } catch (error) {
     const errorState = error.payload && error.payload.knowledge_state;
     handleKnowledgeError(error);
@@ -935,9 +1178,7 @@ async function switchInputMode(nextMode) {
       || (error.code === "knowledge_timeout" && !releaseStillOwned)
     ) {
       clearKnowledgeLease();
-      showInputMode(nextMode);
-    } else {
-      showInputMode("knowledge");
+      clearKnowledgeReviewAudio();
     }
   } finally {
     setKnowledgeOperationPending(false);
@@ -945,25 +1186,151 @@ async function switchInputMode(nextMode) {
   }
 }
 
-async function handleModeKeydown(event) {
-  const navigationKeys = ["ArrowLeft", "ArrowRight", "Home", "End"];
-  if (!navigationKeys.includes(event.key)) return;
-  const enabledButtons = modeButtons.filter((button) => !button.disabled);
-  if (!enabledButtons.length) return;
-
-  event.preventDefault();
-  const currentIndex = Math.max(0, enabledButtons.indexOf(event.currentTarget));
-  let nextIndex = currentIndex;
-  if (event.key === "Home") nextIndex = 0;
-  else if (event.key === "End") nextIndex = enabledButtons.length - 1;
-  else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % enabledButtons.length;
-  else nextIndex = (currentIndex - 1 + enabledButtons.length) % enabledButtons.length;
-
-  const nextButton = enabledButtons[nextIndex];
-  await switchInputMode(nextButton.dataset.mode);
-  const selectedButton = modeButtons.find((button) => button.dataset.mode === inputMode);
-  if (selectedButton) selectedButton.focus();
+async function submitKnowledgeWav(file) {
+  if (!knowledgeLeaseToken) {
+    const acquired = await acquireKnowledgeControl();
+    if (!acquired) return;
+  }
+  beginKnowledgeMutation();
+  clearKnowledgeReviewAudio();
+  persistKnowledgeDraftSource("wav");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  let payload;
+  try {
+    payload = await knowledgeRequest(
+      "/api/device/knowledge/upload",
+      { method: "POST", body: form },
+      TURN_REQUEST_TIMEOUT_MS,
+    );
+  } catch (error) {
+    clearKnowledgeDraftSource();
+    throw error;
+  }
+  persistKnowledgeDraftSource("wav");
+  knowledgeReviewAudioPath = payload.review_audio_url || KNOWLEDGE_REVIEW_AUDIO_PATH;
+  wavReviewGate.beginDraft();
+  wavReview.hidden = false;
+  wavKnowledgeActions.hidden = false;
+  wavKnowledgeRetry.hidden = true;
+  renderAuthoritativeKnowledgeState(payload.knowledge_state);
+  updateControls();
+  await loadKnowledgeReviewAudio();
 }
+
+async function loadKnowledgeReviewAudio() {
+  try {
+    if (!knowledgeReviewAudioPath) throw new Error("复述音频地址不存在");
+    const response = await knowledgeRawRequest(
+      knowledgeReviewAudioPath,
+      {},
+      TURN_REQUEST_TIMEOUT_MS,
+    );
+    const reviewBlob = await response.blob();
+    if (reviewBlob.size === 0) throw new Error("复述音频为空");
+    const objectUrl = URL.createObjectURL(reviewBlob);
+    const playbackToken = wavReviewGate.markLoaded(objectUrl);
+    if (!playbackToken) throw new Error("复述音频为空");
+    mountKnowledgeReviewAudio(objectUrl, playbackToken);
+    updateControls();
+    try {
+      await wavKnowledgeReview.play();
+    } catch {
+      showKnowledgePlaybackWarning(
+        "浏览器未能自动播放复述，请点击播放器并完整试听后再确认。",
+        { audioReady: true },
+      );
+    }
+    return true;
+  } catch (error) {
+    if (error.code === "knowledge_lease_expired") {
+      handleKnowledgeError(error);
+      return false;
+    }
+    wavReviewGate.markFailed();
+    resetKnowledgeReviewPlayer();
+    wavKnowledgeRetry.hidden = false;
+    showKnowledgePlaybackWarning(
+      "复述音频获取失败，请重新获取后再确认。",
+    );
+    updateControls();
+    return false;
+  }
+}
+
+async function retryKnowledgeReviewAudio() {
+  clearError();
+  setKnowledgeOperationPending(true);
+  wavReviewGate.beginDraft();
+  wavKnowledgeRetry.hidden = true;
+  updateControls();
+  try {
+    await loadKnowledgeReviewAudio();
+  } finally {
+    setKnowledgeOperationPending(false);
+  }
+}
+
+async function submitDialogueWav(file) {
+  dialogueSource = "wav";
+  clearAudio();
+  audioHint.textContent = "正在生成语音讲解";
+  statusMessage.textContent = "正在上传音频并执行完整链路";
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const response = await request("/api/device/turn", { method: "POST", body });
+  const payload = await response.json();
+  await renderTurnResult(payload);
+}
+
+async function runDialogueShortPress() {
+  clearError();
+  try {
+    requireKey();
+    dialogueSource = "microphone";
+    const stopping = currentPhase === "recording";
+    setOperationPending(true);
+    if (stopping) {
+      statusMessage.textContent = "正在结束录音并执行完整语音链路";
+      const response = await request("/api/device/recording/stop", { method: "POST" });
+      const payload = await response.json();
+      await renderTurnResult(payload, { localPlayback: true });
+      await refreshMetrics();
+    } else {
+      clearResult();
+      const response = await request("/api/device/recording/start", { method: "POST" });
+      renderState(await response.json());
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    setOperationPending(false);
+    startPolling();
+  }
+}
+
+async function executeUnifiedAction(kind) {
+  const action = getUnifiedAction()[kind];
+  if (!action) {
+    updateControls();
+    return;
+  }
+  await action();
+}
+
+unifiedAction.style.setProperty("--hold-duration", `${HOLD_THRESHOLD_MS}ms`);
+unifiedGesture = ShowroomPressGesture.createPressGesture({
+  thresholdMs: HOLD_THRESHOLD_MS,
+  onShortPress: () => { void executeUnifiedAction("short"); },
+  onLongPress: () => { void executeUnifiedAction("long"); },
+  onHoldStart: () => { unifiedAction.dataset.holding = "true"; },
+  onHoldEnd: () => { unifiedAction.dataset.holding = "false"; },
+});
+unifiedInput = ShowroomDeviceInteraction.bindUnifiedPress({
+  button: unifiedAction,
+  releaseTarget: window,
+  gesture: unifiedGesture,
+});
 
 toggleKey.addEventListener("click", () => {
   const showing = deviceKey.type === "text";
@@ -974,25 +1341,14 @@ toggleKey.addEventListener("click", () => {
   deviceKey.focus();
 });
 
-for (const button of modeButtons) {
-  button.addEventListener("click", async () => {
-    await switchInputMode(button.dataset.mode);
-    const selectedButton = modeButtons.find((item) => item.dataset.mode === inputMode);
-    if (selectedButton) selectedButton.focus();
-  });
-  button.addEventListener("keydown", handleModeKeydown);
-}
-
 deviceKey.addEventListener("change", () => {
   startAllPolling();
   refreshMetrics({ showFailure: true });
-  updateLocalRecordControl();
-  updateKnowledgeControls();
+  updateControls();
 });
 deviceKey.addEventListener("input", () => {
   deviceKeyGeneration += 1;
-  updateLocalRecordControl();
-  updateKnowledgeControls();
+  updateControls();
   stopAllPolling();
   if (!deviceKey.value.trim()) {
     knowledgeSnapshot = null;
@@ -1003,22 +1359,20 @@ deviceKey.addEventListener("input", () => {
     statusMessage.textContent = "填写密钥后开始测试";
     renderMetrics(null);
     clearError();
-    updateKnowledgeControls();
+    updateControls();
   }
 });
 
-knowledgeShortPress.addEventListener("click", async () => {
-  await runKnowledgeOperation("/api/device/knowledge/short-press");
-});
-
-knowledgeLongPress.addEventListener("click", async () => {
-  if (!knowledgeLeaseToken) {
-    await acquireKnowledgeControl();
-    return;
-  }
-  const captureEntry = knowledgeSnapshot && knowledgeSnapshot.mode_state === "confirming";
-  await runKnowledgeOperation("/api/device/knowledge/long-press", { captureEntry });
-});
+wavPurposeDialogue.addEventListener("click", () => setWavPurpose("dialogue"));
+wavPurposeKnowledge.addEventListener("click", () => setWavPurpose("knowledge"));
+wavKnowledgeReview.addEventListener("ended", handleKnowledgeReviewEnded);
+wavKnowledgeReview.addEventListener("error", handleKnowledgeReviewError);
+wavKnowledgeDiscard.addEventListener("click", releaseKnowledgeControl);
+wavKnowledgeRetry.addEventListener("click", retryKnowledgeReviewAudio);
+wavKnowledgeSave.addEventListener("click", () => runKnowledgeOperation(
+  "/api/device/knowledge/long-press",
+  { captureEntry: true },
+));
 
 wavFile.addEventListener("change", () => updateSelectedFile(wavFile.files));
 
@@ -1042,38 +1396,13 @@ dropZone.addEventListener("drop", (event) => {
   updateSelectedFile(wavFile.files);
 });
 
-localRecord.addEventListener("click", async () => {
-  clearError();
-  try {
-    requireKey();
-    const stopping = currentPhase === "recording";
-    setOperationPending(true);
-    if (stopping) {
-      statusMessage.textContent = "正在结束录音并执行完整语音链路";
-      const response = await request("/api/device/recording/stop", { method: "POST" });
-      const payload = await response.json();
-      await renderTurnResult(payload, { localPlayback: true });
-      await refreshMetrics();
-    } else {
-      clearResult();
-      const response = await request("/api/device/recording/start", { method: "POST" });
-      renderState(await response.json());
-    }
-  } catch (error) {
-    showError(error);
-  } finally {
-    setOperationPending(false);
-    startPolling();
-  }
-});
-
 replayRecording.addEventListener("click", async () => {
   clearError();
   try {
     requireKey();
     replayPending = true;
     setOperationPending(true);
-    updateLocalRecordControl();
+    updateControls();
     statusMessage.textContent = "正在由树莓派扬声器播放刚才的录音";
     await request("/api/device/recording/replay", { method: "POST" });
     statusMessage.textContent = "录音播放完成";
@@ -1092,28 +1421,28 @@ deviceForm.addEventListener("submit", async (event) => {
   clearError();
   try {
     requireKey();
-    if (inputMode !== "wav") throw new Error("请先切换到 WAV 文件模式");
     const selected = wavFile.files[0];
     if (!selected) throw new Error("请选择用于测试的 WAV 文件");
     if (!selected.name.toLowerCase().endsWith(".wav")) throw new Error("请选择 WAV 文件");
 
     setOperationPending(true);
-    clearAudio();
-    audioHint.textContent = "正在生成语音讲解";
-    statusMessage.textContent = "正在上传音频并执行完整链路";
-
-    const body = new FormData();
-    body.append("file", selected, selected.name);
-    const response = await request("/api/device/turn", { method: "POST", body });
-    const payload = await response.json();
-    await renderTurnResult(payload);
+    if (wavPurpose === "knowledge") {
+      statusMessage.textContent = "正在识别知识并生成复述";
+      await submitKnowledgeWav(selected);
+    } else {
+      await submitDialogueWav(selected);
+    }
   } catch (error) {
-    showError(error);
-    audioHint.textContent = "语音尚未生成";
+    if (wavPurpose === "knowledge") {
+      handleKnowledgeError(error);
+    } else {
+      showError(error);
+      audioHint.textContent = "语音尚未生成";
+    }
   } finally {
-    await refreshMetrics();
+    if (wavPurpose === "dialogue") await refreshMetrics();
     setOperationPending(false);
-    startPolling();
+    startAllPolling();
   }
 });
 
@@ -1130,7 +1459,9 @@ resetDevice.addEventListener("click", async () => {
     phasePill.dataset.phase = "idle";
     phase.textContent = "待机";
     statusMessage.textContent = "设备已重置，可以开始新一轮测试";
-    updateLocalRecordControl();
+    clearKnowledgeDraftSource();
+    clearKnowledgeReviewAudio();
+    updateControls();
   } catch (error) {
     showError(error);
   } finally {
@@ -1172,15 +1503,31 @@ document.addEventListener("visibilitychange", () => {
   startAllPolling();
 });
 
-window.addEventListener("beforeunload", () => {
+window.addEventListener("pagehide", () => {
   stopAllPolling();
-  if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
+  unifiedInput.cancel();
+  audio.pause();
+  clearKnowledgeReviewAudio();
+  if (audioObjectUrl) {
+    URL.revokeObjectURL(audioObjectUrl);
+    audioObjectUrl = null;
+  }
+  const key = deviceKey.value.trim();
+  if (key && knowledgeLeaseToken) {
+    const headers = new Headers();
+    headers.set("X-Device-Key", key);
+    headers.set("X-Knowledge-Lease", knowledgeLeaseToken);
+    void fetch("/api/device/knowledge/release", {
+      method: "POST",
+      headers,
+      keepalive: true,
+    });
+  }
 });
 
 renderMetrics(null);
-showInputMode("microphone");
-updateLocalRecordControl();
-updateKnowledgeControls();
+setWavPurpose("dialogue");
+updateControls();
 if (deviceKey.value.trim()) {
   refreshMetrics({ showFailure: true });
   startAllPolling();

@@ -8,12 +8,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from showroom_guide.button_workflow import ButtonInteractionMode
-from showroom_guide.device import InvalidDeviceAudio, NoSpeechDetected
+from showroom_guide.device import (
+    InvalidDeviceAudio,
+    InvalidWavFormat,
+    NoSpeechDetected,
+    RecordingTooShort,
+)
 from showroom_guide.knowledge_capture import (
     KnowledgeAsrUnavailable,
     KnowledgeTtsUnavailable,
 )
-from showroom_guide.knowledge_mode import KnowledgeModeState, KnowledgeProcessingStage
+from showroom_guide.knowledge_mode import (
+    KnowledgeModeInvalidState,
+    KnowledgeModeState,
+    KnowledgeProcessingStage,
+)
 from showroom_guide.knowledge_outbox import KnowledgeEntry, OutboxState
 from showroom_guide.local_audio import LocalAudioError
 
@@ -180,6 +189,58 @@ class KnowledgeWebController:
                 raise
             self._renew_owned_lease(token)
             return self._state(KnowledgeControlState.OWNED)
+        finally:
+            self._operation_lock.release()
+
+    async def review_upload(
+        self,
+        token: str,
+        audio: bytes,
+    ) -> KnowledgeWebState:
+        self._raise_operation_busy(token)
+        await self._require_owner(token)
+        await self._acquire_operation(token)
+        try:
+            await self._require_owner_locked(token)
+            self._renew_lease()
+            try:
+                await self._knowledge.review_upload(audio)
+            except BaseException as error:
+                self._renew_owned_lease(token)
+                if isinstance(error, Exception):
+                    self._raise_mapped(error, token)
+                raise
+            self._renew_owned_lease(token)
+            return self._state(KnowledgeControlState.OWNED)
+        finally:
+            self._operation_lock.release()
+
+    async def review_audio(self, token: str) -> bytes:
+        self._raise_operation_busy(token)
+        await self._require_owner(token)
+        await self._acquire_operation(token)
+        try:
+            await self._require_owner_locked(token)
+            self._renew_lease()
+            try:
+                audio = self._knowledge.draft_audio
+                if (
+                    self._knowledge.state is not KnowledgeModeState.CONFIRMING
+                    or not audio
+                ):
+                    raise self._error(
+                        "knowledge_review_not_found",
+                        "知识复述语音不存在",
+                        404,
+                        owner_token=token,
+                    )
+            except BaseException as error:
+                self._renew_owned_lease(token)
+                if isinstance(error, Exception):
+                    self._raise_mapped(error, token)
+                raise
+            self._renew_owned_lease(token)
+            return audio
         finally:
             self._operation_lock.release()
 
@@ -552,8 +613,14 @@ class KnowledgeWebController:
         error: Exception,
         token: str | None = None,
     ) -> KnowledgeWebError | None:
-        if isinstance(error, InvalidDeviceAudio):
+        if isinstance(error, InvalidWavFormat):
+            code, status = "invalid_audio", 415
+        elif isinstance(error, RecordingTooShort):
             code, status = "recording_too_short", 422
+        elif isinstance(error, InvalidDeviceAudio):
+            code, status = "invalid_audio", 415
+        elif isinstance(error, KnowledgeModeInvalidState):
+            code, status = "knowledge_operation_invalid_state", 409
         elif isinstance(error, NoSpeechDetected):
             code, status = "no_speech", 422
         elif isinstance(error, KnowledgeAsrUnavailable):

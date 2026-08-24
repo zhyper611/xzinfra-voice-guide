@@ -1,5 +1,7 @@
 import asyncio
 import io
+import math
+import struct
 import time
 import wave
 from dataclasses import dataclass
@@ -17,6 +19,14 @@ class InvalidDeviceAudio(ValueError):
     pass
 
 
+class InvalidWavFormat(InvalidDeviceAudio):
+    pass
+
+
+class RecordingTooShort(InvalidDeviceAudio):
+    pass
+
+
 class DeviceTranscriptionUnavailable(RuntimeError):
     pass
 
@@ -29,6 +39,12 @@ class NoSpeechDetected(RuntimeError):
 
 
 @dataclass(frozen=True)
+class WavMetrics:
+    duration_seconds: float
+    dbfs: float
+
+
+@dataclass(frozen=True)
 class DeviceTurnResult:
     transcript: str
     answer: str
@@ -38,7 +54,7 @@ class DeviceTurnResult:
 
 def validate_wav(audio: bytes) -> None:
     if len(audio) < 12 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
-        raise InvalidDeviceAudio("必须上传有效的 WAV 文件")
+        raise InvalidWavFormat("必须上传有效的 WAV 文件")
     try:
         with wave.open(io.BytesIO(audio), "rb") as source:
             channels = source.getnchannels()
@@ -47,16 +63,35 @@ def validate_wav(audio: bytes) -> None:
             compression = source.getcomptype()
     except (EOFError, wave.Error) as error:
         message = "WAV 必须使用 PCM 编码" if b"fmt " in audio else "WAV 文件已损坏"
-        raise InvalidDeviceAudio(message) from error
+        raise InvalidWavFormat(message) from error
 
     if compression != "NONE":
-        raise InvalidDeviceAudio("WAV 必须使用 PCM 编码")
+        raise InvalidWavFormat("WAV 必须使用 PCM 编码")
     if channels != 1:
-        raise InvalidDeviceAudio("WAV 必须为单声道")
+        raise InvalidWavFormat("WAV 必须为单声道")
     if sample_width != 2:
-        raise InvalidDeviceAudio("WAV 必须为 16-bit")
+        raise InvalidWavFormat("WAV 必须为 16-bit")
     if sample_rate != 16000:
-        raise InvalidDeviceAudio("WAV 采样率必须为 16 kHz")
+        raise InvalidWavFormat("WAV 采样率必须为 16 kHz")
+
+
+def inspect_wav(audio: bytes) -> WavMetrics:
+    validate_wav(audio)
+    with wave.open(io.BytesIO(audio), "rb") as source:
+        duration_seconds = source.getnframes() / source.getframerate()
+        frames = source.readframes(source.getnframes())
+
+    sample_count = len(frames) // 2
+    if sample_count == 0:
+        return WavMetrics(duration_seconds=duration_seconds, dbfs=-math.inf)
+
+    square_sum = sum(
+        sample * sample
+        for (sample,) in struct.iter_unpack("<h", frames)
+    )
+    rms = math.sqrt(square_sum / sample_count)
+    dbfs = -math.inf if rms == 0 else 20 * math.log10(rms / 32768)
+    return WavMetrics(duration_seconds=duration_seconds, dbfs=dbfs)
 
 
 class DeviceVoiceSession:
