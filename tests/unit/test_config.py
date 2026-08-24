@@ -44,6 +44,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.tts_base_url == "http://tts.test"
     assert settings.ptt_pin == 17
     assert settings.first_audio_timeout_seconds == 5.0
+    assert settings.asr_timeout_seconds == 8.0
+    assert settings.tts_timeout_seconds == 12.0
     assert settings.playback_timeout_seconds == 300.0
     assert settings.knowledge_outbox_path == (
         Path.home()
@@ -91,6 +93,8 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     monkeypatch.setenv("GUIDE_FAQ_PREPARED_AUDIO_ENABLED", "false")
     monkeypatch.setenv("GUIDE_LOCAL_RECORDING_MIN_DBFS", "-50")
     monkeypatch.setenv("GUIDE_KNOWLEDGE_WEB_LEASE_SECONDS", "45.5")
+    monkeypatch.setenv("GUIDE_ASR_TIMEOUT_SECONDS", "6.5")
+    monkeypatch.setenv("GUIDE_TTS_TIMEOUT_SECONDS", "10.5")
 
     settings = Settings(_env_file=None)
 
@@ -103,6 +107,8 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     assert settings.faq_prepared_audio_enabled is False
     assert settings.local_recording_min_dbfs == -50.0
     assert settings.knowledge_web_lease_seconds == 45.5
+    assert settings.asr_timeout_seconds == 6.5
+    assert settings.tts_timeout_seconds == 10.5
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])

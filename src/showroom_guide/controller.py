@@ -38,7 +38,7 @@ class UnlimitedGate:
 
 
 class GuideController:
-    _MAX_ANSWER_CHARS = 1000
+    _MAX_ANSWER_CHARS = 160
     _TRUNCATION_MARK = "……"
     _UNANCHORED_REFERENCES = (
         "这个",
@@ -119,12 +119,13 @@ class GuideController:
             cached_entry = self._faq_cache.match(question)
             if cached_entry is not None:
                 await self._state.set_message("正在准备讲解内容")
-                answer = cached_entry.answer
+                answer = self._bound_answer(cached_entry.answer)
                 await self._state.set_answer(answer)
                 self._remember_exchange(question, answer)
                 prepared_audio = (
                     self._prepared_audio.get(cached_entry.id)
                     if self._prepared_audio is not None
+                    and answer == cached_entry.answer
                     else None
                 )
                 if prepared_audio is not None:
@@ -226,6 +227,13 @@ class GuideController:
             ]
         )
         self._messages = self._messages[-20:]
+
+    @classmethod
+    def _bound_answer(cls, answer: str) -> str:
+        if len(answer) <= cls._MAX_ANSWER_CHARS:
+            return answer
+        content_limit = cls._MAX_ANSWER_CHARS - len(cls._TRUNCATION_MARK)
+        return answer[:content_limit].rstrip() + cls._TRUNCATION_MARK
 
     def _needs_exhibit_clarification(self, question: str) -> bool:
         return not self._messages and any(

@@ -124,6 +124,26 @@ async def test_records_pcm_wav_and_plays_from_stdin():
 
 
 @pytest.mark.asyncio
+async def test_waits_for_playback_to_reach_hardware_before_recording(monkeypatch):
+    events = []
+
+    async def fake_sleep(seconds):
+        events.append(("sleep", seconds))
+
+    async def process_factory(*args, **kwargs):
+        events.append(("process", args[0]))
+        return FakeProcess()
+
+    monkeypatch.setattr(local_audio_module.asyncio, "sleep", fake_sleep)
+    controller = LocalAudioController(process_factory=process_factory)
+
+    await controller.start_recording()
+
+    assert events[:2] == [("sleep", 0.3), ("process", "pw-record")]
+    await controller.abort_recording()
+
+
+@pytest.mark.asyncio
 async def test_accepts_pw_record_exit_one_after_intentional_sigint():
     class PipeWireRecordProcess(FakeProcess):
         async def wait(self):

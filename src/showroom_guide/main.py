@@ -276,7 +276,8 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         configured.tts_model,
         configured.tts_voice,
         configured.tts_speed,
-        configured.request_timeout_seconds,
+        configured.asr_timeout_seconds,
+        configured.tts_timeout_seconds,
     )
     faq_admin_service = (
         FaqCacheReadService(configured.faq_cache_file, tts_profile, speech)

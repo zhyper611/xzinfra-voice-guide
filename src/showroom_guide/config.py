@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     tts_voice: str = "alloy"
     tts_speed: float = Field(default=1.0, ge=0.25, le=4.0)
     request_timeout_seconds: float = Field(default=30.0, gt=0)
+    asr_timeout_seconds: float = Field(default=8.0, gt=0)
+    tts_timeout_seconds: float = Field(default=12.0, gt=0)
     first_audio_timeout_seconds: float = Field(default=5.0, gt=0)
     playback_timeout_seconds: float = Field(default=300.0, gt=0)
     session_idle_seconds: float = Field(default=1800.0, gt=0)
