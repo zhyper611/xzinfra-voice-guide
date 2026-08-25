@@ -2,8 +2,11 @@ import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
+from showroom_guide import main as main_module
 from showroom_guide.config import Settings
 from showroom_guide.knowledge_web import KnowledgeWebError
 from showroom_guide.main import Runtime, create_runtime
@@ -154,11 +157,25 @@ async def test_disabled_knowledge_web_does_not_receive_gpio_workflow():
 
 
 @pytest.mark.asyncio
-async def test_runtime_builds_optional_knowledge_pipeline(tmp_path):
+async def test_runtime_builds_optional_knowledge_pipeline(tmp_path, monkeypatch):
+    auth_arguments = []
+    auth_closed = False
+
+    class FakeAuth:
+        async def aclose(self):
+            nonlocal auth_closed
+            auth_closed = True
+
+    def build_auth(base_url, username, password, *, timeout):
+        auth_arguments.append((base_url, username, password, timeout))
+        return FakeAuth()
+
+    monkeypatch.setattr(main_module, "XzkbLocalAccountAuth", build_auth)
     runtime = create_runtime(
         make_settings(
             knowledge_capture_enabled=True,
-            xzkb_write_token="write-user-token",
+            xzkb_username="showroom-writer",
+            xzkb_password="dedicated-account-password",
             xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
             knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
             knowledge_web_lease_seconds=45,
@@ -173,9 +190,105 @@ async def test_runtime_builds_optional_knowledge_pipeline(tmp_path):
     assert runtime.knowledge_web._knowledge is runtime.knowledge_mode
     assert runtime.knowledge_web._buttons is runtime.button_workflow
     assert runtime.knowledge_web._lease_seconds == 45
+    knowledge_client = runtime.knowledge_sync._client
+    assert auth_arguments == [
+        (
+            "http://xzkb.test",
+            "showroom-writer",
+            "dedicated-account-password",
+            30.0,
+        )
+    ]
 
     await runtime.aclose()
-    assert runtime.knowledge_sync._client._client.is_closed
+    assert knowledge_client._client.is_closed
+    assert auth_closed is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_creation_does_not_send_network_requests(
+    tmp_path,
+    monkeypatch,
+):
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("unexpected network")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", unexpected_request)
+
+    runtime = create_runtime(
+        make_settings(
+            knowledge_capture_enabled=True,
+            xzkb_username="showroom-writer",
+            xzkb_password="dedicated-account-password",
+            xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
+            knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
+        )
+    )
+
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("attribute", "invalid_value"),
+    [
+        ("xzkb_username", None),
+        ("xzkb_username", ""),
+        ("xzkb_password", None),
+        ("xzkb_password", SecretStr("")),
+        ("xzkb_knowledge_base_id", None),
+    ],
+)
+def test_runtime_rejects_invalid_knowledge_credentials(
+    tmp_path,
+    attribute,
+    invalid_value,
+):
+    settings = make_settings(
+        knowledge_capture_enabled=True,
+        xzkb_username="showroom-writer",
+        xzkb_password="dedicated-account-password",
+        xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
+        knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
+    )
+    object.__setattr__(settings, attribute, invalid_value)
+
+    with pytest.raises(
+        ValueError,
+        match="^启用知识补充时必须配置 XZKB 专用账号、密码和知识库 ID$",
+    ):
+        create_runtime(settings)
+
+
+def test_runtime_does_not_create_auth_when_outbox_open_fails(
+    tmp_path,
+    monkeypatch,
+):
+    auth_arguments = []
+
+    def fail_outbox(_path):
+        raise OSError("outbox unavailable")
+
+    def build_auth(*args, **kwargs):
+        auth_arguments.append((args, kwargs))
+        return SimpleNamespace()
+
+    monkeypatch.setattr(main_module, "KnowledgeOutbox", fail_outbox)
+    monkeypatch.setattr(main_module, "XzkbLocalAccountAuth", build_auth)
+
+    with pytest.raises(OSError, match="outbox unavailable"):
+        create_runtime(
+            make_settings(
+                knowledge_capture_enabled=True,
+                xzkb_username="showroom-writer",
+                xzkb_password="dedicated-account-password",
+                xzkb_knowledge_base_id=(
+                    "11111111-1111-1111-1111-111111111111"
+                ),
+                knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
+            )
+        )
+
+    assert auth_arguments == []
 
 
 @pytest.mark.asyncio
@@ -183,7 +296,8 @@ async def test_runtime_closes_knowledge_web_before_knowledge_resources(tmp_path)
     runtime = create_runtime(
         make_settings(
             knowledge_capture_enabled=True,
-            xzkb_write_token="write-user-token",
+            xzkb_username="showroom-writer",
+            xzkb_password="dedicated-account-password",
             xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
             knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
         )
@@ -209,9 +323,14 @@ async def test_runtime_closes_knowledge_web_before_knowledge_resources(tmp_path)
     runtime.knowledge_mode.aclose = close_mode
     runtime.knowledge_sync.aclose = close_sync
 
+    knowledge_client = runtime.knowledge_sync._client
+    auth = knowledge_client._auth
+
     await runtime.aclose()
 
     assert events == ["knowledge_web", "knowledge_mode", "knowledge_sync"]
+    assert knowledge_client._client.is_closed
+    assert auth._client.is_closed
 
 
 @pytest.mark.asyncio

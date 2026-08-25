@@ -1,14 +1,56 @@
 import asyncio
 import logging
 import time
+import traceback
 from contextlib import suppress
 from typing import Callable
 
-from showroom_guide.clients.xzkb_knowledge import DocumentProcessingState
+from showroom_guide.clients.xzkb_auth import XzkbAuthenticationError
+from showroom_guide.clients.xzkb_knowledge import (
+    DocumentProcessingState,
+    XzkbKnowledgeAuthenticationError,
+    XzkbKnowledgePermissionError,
+    XzkbKnowledgeUnavailableError,
+)
 from showroom_guide.knowledge_outbox import KnowledgeOutbox, OutboxState
 
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_sync_error_message(error: Exception) -> str:
+    messages = {
+        (XzkbAuthenticationError, XzkbKnowledgeAuthenticationError): (
+            "XZKB 专用账号登录失败，知识已本地保存，等待同步"
+        ),
+        XzkbKnowledgePermissionError: (
+            "XZKB 专用账号无目标知识库写入权限，知识已本地保存"
+        ),
+        XzkbKnowledgeUnavailableError: ("XZKB 暂时不可用，知识已本地保存，等待同步"),
+    }
+    for error_type, message in messages.items():
+        if isinstance(error, error_type):
+            return message
+    return "XZKB 同步失败，知识已本地保存，等待同步"
+
+
+def _safe_sync_exc_info(
+    safe_message: str,
+) -> tuple[type[RuntimeError], RuntimeError, None]:
+    return RuntimeError, RuntimeError(safe_message), None
+
+
+def _safe_sync_error_stack(error: Exception) -> tuple[str, ...]:
+    if error.__traceback__ is None:
+        return ()
+    return tuple(
+        "{}:{} in {}".format(
+            frame.filename.replace("\\", "/").rsplit("/", 1)[-1],
+            frame.lineno,
+            frame.name,
+        )
+        for frame in traceback.extract_tb(error.__traceback__)
+    )
 
 
 class KnowledgeSyncService:
@@ -90,14 +132,22 @@ class KnowledgeSyncService:
                         retry_after_seconds=self._poll_seconds,
                     )
             except Exception as error:
+                error_stack = _safe_sync_error_stack(error)
+                error_stack_text = " <- ".join(error_stack) or "<none>"
+                safe_message = _safe_sync_error_message(error)
                 logger.warning(
-                    "knowledge_sync_failed",
-                    extra={"entry_id": entry.id, "attempts": entry.attempts},
-                    exc_info=True,
+                    "knowledge_sync_failed error_stack=%s",
+                    error_stack_text,
+                    extra={
+                        "entry_id": entry.id,
+                        "attempts": entry.attempts,
+                        "error_stack": error_stack,
+                    },
+                    exc_info=_safe_sync_exc_info(safe_message),
                 )
                 self._outbox.mark_failed(
                     entry.id,
-                    str(error) or type(error).__name__,
+                    safe_message,
                     retry_after_seconds=self._backoff(entry.attempts),
                 )
 

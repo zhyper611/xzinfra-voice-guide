@@ -198,7 +198,7 @@ def test_settings_rejects_recording_minimum_not_below_maximum():
 
 
 def test_knowledge_capture_requires_write_credentials():
-    with pytest.raises(ValidationError, match="知识补充"):
+    with pytest.raises(ValidationError, match="专用账号"):
         Settings(
             _env_file=None,
             xzkb_base_url="http://xzkb.test",
@@ -212,6 +212,114 @@ def test_knowledge_capture_requires_write_credentials():
             tts_model="company-tts",
             device_api_key="device-test-key",
             knowledge_capture_enabled=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"xzkb_username": "showroom-writer"},
+        {"xzkb_password": "dedicated-account-password"},
+    ],
+)
+def test_knowledge_capture_requires_complete_dedicated_account(credentials):
+    with pytest.raises(ValidationError, match="专用账号"):
+        Settings(
+            _env_file=None,
+            xzkb_base_url="http://xzkb.test",
+            xzkb_api_key="test-key",
+            xzkb_empty_search_response="请询问展厅相关内容。",
+            asr_base_url="http://asr.test",
+            asr_api_key="asr-test-key",
+            asr_model="company-asr",
+            tts_base_url="http://tts.test",
+            tts_api_key="tts-test-key",
+            tts_model="company-tts",
+            device_api_key="device-test-key",
+            knowledge_capture_enabled=True,
+            xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
+            **credentials,
+        )
+
+
+def test_knowledge_capture_validation_does_not_expose_password():
+    password = "LEAK-ME-NOW"
+
+    with pytest.raises(ValidationError, match="专用账号") as exc:
+        Settings(
+            _env_file=None,
+            xzkb_base_url="http://xzkb.test",
+            xzkb_api_key="test-key",
+            xzkb_empty_search_response="请询问展厅相关内容。",
+            asr_base_url="http://asr.test",
+            asr_api_key="asr-test-key",
+            asr_model="company-asr",
+            tts_base_url="http://tts.test",
+            tts_api_key="tts-test-key",
+            tts_model="company-tts",
+            device_api_key="device-test-key",
+            knowledge_capture_enabled=True,
+            xzkb_username="showroom-writer",
+            xzkb_password=password,
+        )
+
+    assert password not in str(exc.value)
+    assert password not in repr(exc.value)
+    assert password not in repr(exc.value.errors())
+    assert password not in exc.value.json()
+
+
+@pytest.mark.parametrize("username", [123, ["showroom-writer"]])
+def test_settings_rejects_non_string_xzkb_username(username):
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            xzkb_base_url="http://xzkb.test",
+            xzkb_api_key="test-key",
+            xzkb_empty_search_response="请询问展厅相关内容。",
+            asr_base_url="http://asr.test",
+            asr_api_key="asr-test-key",
+            asr_model="company-asr",
+            tts_base_url="http://tts.test",
+            tts_api_key="tts-test-key",
+            tts_model="company-tts",
+            device_api_key="device-test-key",
+            xzkb_username=username,
+        )
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {
+            "xzkb_username": "",
+            "xzkb_password": "dedicated-account-password",
+        },
+        {"xzkb_username": "showroom-writer", "xzkb_password": ""},
+        {
+            "xzkb_username": " \t ",
+            "xzkb_password": "dedicated-account-password",
+        },
+        {"xzkb_username": "showroom-writer", "xzkb_password": " \t "},
+    ],
+)
+def test_knowledge_capture_rejects_empty_dedicated_account(credentials):
+    with pytest.raises(ValidationError, match="专用账号"):
+        Settings(
+            _env_file=None,
+            xzkb_base_url="http://xzkb.test",
+            xzkb_api_key="test-key",
+            xzkb_empty_search_response="请询问展厅相关内容。",
+            asr_base_url="http://asr.test",
+            asr_api_key="asr-test-key",
+            asr_model="company-asr",
+            tts_base_url="http://tts.test",
+            tts_api_key="tts-test-key",
+            tts_model="company-tts",
+            device_api_key="device-test-key",
+            knowledge_capture_enabled=True,
+            xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
+            **credentials,
         )
 
 
@@ -229,7 +337,8 @@ def test_knowledge_capture_accepts_complete_configuration(tmp_path):
         tts_model="company-tts",
         device_api_key="device-test-key",
         knowledge_capture_enabled=True,
-        xzkb_write_token="write-user-token",
+        xzkb_username=" showroom-writer ",
+        xzkb_password=" dedicated-account-password ",
         xzkb_knowledge_base_id="11111111-1111-1111-1111-111111111111",
         knowledge_outbox_path=tmp_path / "knowledge.sqlite3",
         gpio_button_enabled=True,
@@ -238,6 +347,12 @@ def test_knowledge_capture_accepts_complete_configuration(tmp_path):
     assert settings.knowledge_capture_enabled is True
     assert settings.gpio_button_enabled is True
     assert settings.button_hold_seconds == 1.5
+    assert settings.xzkb_username == "showroom-writer"
+    assert (
+        settings.xzkb_password.get_secret_value()
+        == " dedicated-account-password "
+    )
+    assert "dedicated-account-password" not in repr(settings)
 
 
 def test_knowledge_outbox_path_expands_user_home():
@@ -269,3 +384,33 @@ def test_example_environment_is_valid_with_optional_features_disabled():
     assert settings.knowledge_capture_enabled is False
     assert settings.gpio_button_enabled is False
     assert settings.knowledge_web_lease_seconds == 120.0
+
+
+@pytest.mark.parametrize(
+    ("env_value", "requires_account"),
+    [("true", True), ("false", False)],
+)
+def test_knowledge_capture_parses_boolean_environment(
+    monkeypatch, env_value, requires_account
+):
+    monkeypatch.setenv("GUIDE_KNOWLEDGE_CAPTURE_ENABLED", env_value)
+    settings_kwargs = {
+        "_env_file": None,
+        "xzkb_base_url": "http://xzkb.test",
+        "xzkb_api_key": "test-key",
+        "xzkb_empty_search_response": "请询问展厅相关内容。",
+        "asr_base_url": "http://asr.test",
+        "asr_api_key": "asr-test-key",
+        "asr_model": "company-asr",
+        "tts_base_url": "http://tts.test",
+        "tts_api_key": "tts-test-key",
+        "tts_model": "company-tts",
+        "device_api_key": "device-test-key",
+    }
+
+    if requires_account:
+        with pytest.raises(ValidationError, match="专用账号"):
+            Settings(**settings_kwargs)
+    else:
+        settings = Settings(**settings_kwargs)
+        assert settings.knowledge_capture_enabled is False

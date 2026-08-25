@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -11,6 +11,7 @@ class Settings(BaseSettings):
         env_prefix="GUIDE_",
         env_file="/etc/showroom-guide/showroom-guide.env",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     xzkb_base_url: str = Field(min_length=1)
@@ -53,7 +54,8 @@ class Settings(BaseSettings):
     gpio_button_enabled: bool = False
     button_hold_seconds: float = Field(default=1.5, gt=0)
     knowledge_capture_enabled: bool = False
-    xzkb_write_token: SecretStr | None = None
+    xzkb_username: str | None = Field(default=None, min_length=1)
+    xzkb_password: SecretStr | None = None
     xzkb_knowledge_base_id: UUID | None = None
     xzkb_knowledge_folder_id: UUID | None = None
     knowledge_outbox_path: Path = (
@@ -86,21 +88,49 @@ class Settings(BaseSettings):
             raise ValueError("XZKB 空回复不能为空")
         return normalized
 
+    @field_validator("xzkb_username", mode="before")
+    @classmethod
+    def normalize_xzkb_username(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("XZKB 专用账号用户名不能为空")
+        return normalized
+
     @field_validator("knowledge_outbox_path", mode="before")
     @classmethod
     def expand_knowledge_outbox_path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
 
+    @model_validator(mode="before")
+    @classmethod
+    def protect_xzkb_password(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+
+        password = values.get("xzkb_password")
+        if isinstance(password, str):
+            values["xzkb_password"] = SecretStr(password)
+        return values
+
     @model_validator(mode="after")
     def validate_local_recording_limits(self) -> Self:
         if self.local_recording_min_seconds >= self.local_recording_max_seconds:
             raise ValueError("最短录音时长必须小于最长录音时长")
+        return self
+
+    @model_validator(mode="after")
+    def validate_knowledge_capture_credentials(self) -> Self:
+        password = self.xzkb_password
         if self.knowledge_capture_enabled and (
-            self.xzkb_write_token is None
+            self.xzkb_username is None
+            or password is None
+            or not password.get_secret_value().strip()
             or self.xzkb_knowledge_base_id is None
         ):
             raise ValueError(
-                "启用知识补充时必须配置 XZKB 写入 Token 和知识库 ID"
+                "启用知识补充时必须配置 XZKB 专用账号和知识库 ID"
             )
         return self
 
