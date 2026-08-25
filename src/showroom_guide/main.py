@@ -28,6 +28,7 @@ from showroom_guide.audio_store import AudioNotFound, AudioStore
 from showroom_guide.button_workflow import DeviceButtonWorkflow
 from showroom_guide.clients.speech import SpeechClient
 from showroom_guide.clients.xzkb import XzkbClient
+from showroom_guide.clients.xzkb_auth import XzkbLocalAccountAuth
 from showroom_guide.clients.xzkb_knowledge import XzkbKnowledgeClient
 from showroom_guide.concurrency import AsyncGate
 from showroom_guide.config import Settings
@@ -246,6 +247,22 @@ class Runtime:
 
 def create_runtime(settings: Settings | None = None) -> Runtime:
     configured = settings or Settings()
+    knowledge_credentials = None
+    if configured.knowledge_capture_enabled:
+        username = configured.xzkb_username
+        password = configured.xzkb_password
+        kb_id = configured.xzkb_knowledge_base_id
+        if (
+            username is None
+            or not username.strip()
+            or password is None
+            or not password.get_secret_value().strip()
+            or kb_id is None
+        ):
+            raise ValueError(
+                "启用知识补充时必须配置 XZKB 专用账号、密码和知识库 ID"
+            )
+        knowledge_credentials = (username, password, kb_id)
     faq_cache = (
         load_cache(configured.faq_cache_file)
         if configured.faq_cache_enabled
@@ -346,11 +363,19 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
     knowledge_mode = None
     knowledge_outbox = None
     knowledge_sync = None
-    if configured.knowledge_capture_enabled:
+    if knowledge_credentials is not None:
+        username, password, kb_id = knowledge_credentials
+        knowledge_outbox = KnowledgeOutbox(configured.knowledge_outbox_path)
+        knowledge_auth = XzkbLocalAccountAuth(
+            configured.xzkb_base_url,
+            username,
+            password.get_secret_value(),
+            timeout=configured.request_timeout_seconds,
+        )
         knowledge_client = XzkbKnowledgeClient(
             configured.xzkb_base_url,
-            configured.xzkb_write_token.get_secret_value(),
-            str(configured.xzkb_knowledge_base_id),
+            knowledge_auth,
+            str(kb_id),
             folder_id=(
                 str(configured.xzkb_knowledge_folder_id)
                 if configured.xzkb_knowledge_folder_id is not None
@@ -358,7 +383,6 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             ),
             timeout=configured.request_timeout_seconds,
         )
-        knowledge_outbox = KnowledgeOutbox(configured.knowledge_outbox_path)
         knowledge_sync = KnowledgeSyncService(
             knowledge_outbox,
             knowledge_client,
