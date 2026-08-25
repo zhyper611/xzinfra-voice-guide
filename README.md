@@ -1,6 +1,6 @@
 # XZInfra Voice Guide
 
-运行在 Raspberry Pi 5 上的展厅 AI 语音讲解服务。它将访客提问依次发送到远程 ASR、XZKB 知识库和 TTS 服务，支持网页多人会话，也提供面向树莓派物理设备的语音闭环接口。
+运行在 Raspberry Pi 5 上的展厅 AI 语音讲解服务。它支持远程 ASR、XZKB 知识库和 TTS 服务，并通过高频问答文本与预生成语音缓存缩短固定讲解的响应时间。项目支持网页多人会话，也提供面向树莓派物理设备的语音闭环接口。
 
 ## 功能
 
@@ -12,6 +12,9 @@
 - 本地录音、上传、处理和播放使用同一套设备互斥流程
 - 设备接口使用独立密钥鉴权
 - XZKB 与 TTS 并发门控和排队超时
+- 高频问答精确匹配与主题词、意图词规则匹配
+- 高频回答命中后跳过知识库，预生成语音有效时同时跳过在线 TTS
+- 独立的高频问答文本、语音生成、试听和审批维护页
 - TTS 不可用时保留文字回答
 - 用户级 systemd 开机自启模板
 
@@ -19,11 +22,14 @@
 
 ```text
 网页用户 ──文字问题──────────────┐
-                                 ├──> XZKB ──> TTS ──> 网页播放
-树莓派设备 ──WAV ──> ASR ───────┘
+                                 ├──> 高频问答匹配 ──┬──> 固定回答 + 预生成语音
+树莓派设备 ──WAV ──> ASR ───────┘                    ├──> 固定回答 + 在线 TTS
+                                                      └──> XZKB + 在线 TTS
 ```
 
 网页访客之间不共享会话。物理设备使用单独的长期会话，因此网页访问不会污染设备的追问上下文。
+
+高频问答按照“精确 alias → 主题词与意图词规则 → XZKB”匹配。命中后直接使用人工审核的固定回答；对应预生成 WAV 校验有效时直接播放，否则回退在线 TTS。未命中、存在歧义或包含实时/比较等排除意图的问题继续使用原有知识库链路。维护规则见 [高频问答缓存维护说明](docs/faq-cache-maintenance.md)。
 
 ## 环境要求
 
@@ -72,6 +78,11 @@ chmod 600 .env
 | `GUIDE_TTS_BASE_URL` | 语音服务根地址；程序会追加 `/audio/speech` |
 | `GUIDE_TTS_API_KEY` | TTS API 密钥 |
 | `GUIDE_TTS_MODEL` | TTS 模型名称 |
+| `GUIDE_FAQ_CACHE_ENABLED` | 是否启用高频问答文本缓存，默认开启 |
+| `GUIDE_FAQ_CACHE_FILE` | 高频问答 YAML 路径，默认 `config/faq_cache.yaml` |
+| `GUIDE_FAQ_PREPARED_AUDIO_ENABLED` | 是否加载已审批的预生成语音，默认开启 |
+| `GUIDE_FAQ_ADMIN_ENABLED` | 是否启用 `/faq-cache` 维护接口，默认关闭 |
+| `GUIDE_FAQ_ADMIN_API_KEY` | 高频问答维护页独立管理密钥 |
 | `GUIDE_DEVICE_API_KEY` | 设备专用接口密钥，建议使用高熵随机值 |
 | `GUIDE_CAPTURE_DEVICE` | PipeWire 输入目标；`default` 使用系统默认麦克风 |
 | `GUIDE_PLAYBACK_DEVICE` | PipeWire 输出目标；`default` 使用系统默认扬声器 |
@@ -102,6 +113,7 @@ set +a
 
 - `/`：多人网页问答页
 - `/device-test`：设备语音 HTTP 测试页
+- `/faq-cache`：高频问答文本与语音维护页；需要单独启用并配置管理密钥
 - `/docs`：FastAPI 接口文档
 
 ## 设备接口
@@ -120,7 +132,7 @@ curl -X POST http://127.0.0.1:8765/api/device/turn \
   -F "file=@question.wav;type=audio/wav"
 ```
 
-响应包含识别文本、知识库回答和临时 TTS 音频地址。播放结束后调用 `/api/device/playback-finished`，开始新讲解任务前可调用 `/api/device/reset` 清空设备上下文。
+响应包含识别文本、最终回答和临时音频地址。回答可能来自高频问答缓存或 XZKB，音频可能来自预生成 WAV 或在线 TTS。播放结束后调用 `/api/device/playback-finished`，开始新讲解任务前可调用 `/api/device/reset` 清空设备上下文。
 
 ### 本地麦克风与扬声器
 
@@ -131,7 +143,7 @@ command -v pw-record
 command -v pw-play
 ```
 
-在 `/device-test` 中选择“本机麦克风”，第一次点击开始录音，第二次点击结束并提交。后端会依次执行 ASR、XZKB 和 TTS，再通过树莓派默认扬声器自动播放回答；页面不负责采集或播放本地语音。
+在 `/device-test` 中选择“本机麦克风”，第一次点击开始录音，第二次点击结束并提交。后端先执行 ASR，再尝试高频问答缓存；未命中时访问 XZKB，缺少有效预生成语音时调用在线 TTS，最后通过树莓派默认扬声器自动播放回答。页面不负责采集或播放本地语音。
 
 停止录音后，测试页会启用“播放刚才的录音”。该按钮通过树莓派默认扬声器播放最近一次麦克风 WAV，成功和失败录音都可回放。录音只在进程内存中保留一份，下一次本地录音、设备重置或服务重启后清除，不提供浏览器下载接口。
 
@@ -165,6 +177,20 @@ $result.latest | Format-List
 device-test 页面会在每次问答后显示最近一次实际耗时。
 
 结果包含 ASR、知识库、TTS 和服务端总耗时的样本数、P50、P95；最多统计最近 500 次成功请求，服务重启后清空。
+
+### 三链路基准测试
+
+基准工具可使用五条标准语音，交错比较“预生成语音”“高频文本 + 在线 TTS”和“XZKB + 在线 TTS”。命令会调用真实上游服务，结果写入已忽略的 `benchmark-results/`：
+
+```powershell
+.\.venv\Scripts\python.exe -m showroom_guide.benchmark `
+  --env-file .env --standard-fixtures `
+  --output-dir benchmark-results/multi-audio-smoke `
+  --scenarios prepared_audio faq_online_tts xzkb_online_tts `
+  --mode reliability --execution-order interleaved `
+  --runs 5 --warmup 1 --interval-seconds 10 `
+  --confirm-live-requests
+```
 
 ## 测试
 
