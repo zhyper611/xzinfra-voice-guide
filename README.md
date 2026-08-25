@@ -84,12 +84,19 @@ chmod 600 .env
 | `GUIDE_FAQ_ADMIN_ENABLED` | 是否启用 `/faq-cache` 维护接口，默认关闭 |
 | `GUIDE_FAQ_ADMIN_API_KEY` | 高频问答维护页独立管理密钥 |
 | `GUIDE_DEVICE_API_KEY` | 设备专用接口密钥，建议使用高熵随机值 |
+| `GUIDE_KNOWLEDGE_CAPTURE_ENABLED` | 是否启用知识补充；启用后必须配置下列 XZKB 专用账号和知识库 ID |
+| `GUIDE_XZKB_USERNAME` | 拥有目标知识库写入权限的 XZKB 专用本地账号 |
+| `GUIDE_XZKB_PASSWORD` | XZKB 专用账号密码；仅保存在权限为 `600` 的运行环境文件中 |
+| `GUIDE_XZKB_KNOWLEDGE_BASE_ID` | 知识补充写入的目标知识库 ID |
+| `GUIDE_XZKB_KNOWLEDGE_FOLDER_ID` | 可选的目标文件夹 ID |
 | `GUIDE_CAPTURE_DEVICE` | PipeWire 输入目标；`default` 使用系统默认麦克风 |
 | `GUIDE_PLAYBACK_DEVICE` | PipeWire 输出目标；`default` 使用系统默认扬声器 |
 | `GUIDE_LOCAL_RECORDING_MAX_SECONDS` | 本地单次录音最长时间，默认 60 秒 |
 | `GUIDE_LOCAL_RECORDING_MIN_SECONDS` | 可提交的最短录音时间，默认 0.5 秒 |
 
 其他可调项及默认值见 [.env.example](.env.example)。不要把真实 `.env`、API Key 或设备密钥提交到 Git。
+
+知识补充不使用需要人工定期更换的固定写入 Token。后台同步会用专用账号自动登录，并把 Access Token 仅缓存在进程内存中；遇到 `401` 时自动重新登录并重试一次。登录、上传或处理失败不会丢失已确认知识，本地 Outbox 会保留条目并按退避策略继续同步。
 
 生成设备密钥的一种方式：
 
@@ -158,6 +165,20 @@ POST /api/device/recording/replay
 ```
 
 三个接口都需要 `X-Device-Key`。录音最长 60 秒，到达上限后自动结束并处理；过短或没有可识别语言的录音不会查询知识库。
+
+网页知识补充还会使用以下受保护接口；除了 `X-Device-Key`，控制操作还需要页面获取的 `X-Knowledge-Lease`：
+
+```text
+POST /api/device/knowledge/acquire
+POST /api/device/knowledge/short-press
+POST /api/device/knowledge/long-press
+POST /api/device/knowledge/upload
+GET  /api/device/knowledge/review-audio
+POST /api/device/knowledge/release
+GET  /api/device/knowledge/state
+```
+
+上传的 WAV 只用于生成当前知识草稿，不会写入 XZKB；用户确认后，规范化文字才进入本地 Outbox 并由后台同步。
 
 更换专用麦克风和扬声器时，将它们设置为 PipeWire 默认输入和默认输出即可，不需要修改项目代码。也可以通过 `GUIDE_CAPTURE_DEVICE`、`GUIDE_PLAYBACK_DEVICE` 指定稳定的 PipeWire 节点名称。
 
