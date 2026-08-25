@@ -1,4 +1,3 @@
-import string
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -20,18 +19,14 @@ class CachePriority(StrEnum):
     MEDIUM = "medium"
 
 
-# NFKC converts common full-width punctuation to its ASCII equivalent. These
-# characters remain here because they are not all converted by NFKC.
-_PUNCTUATION = frozenset(string.punctuation + "，。！？；：、（）【】［］「」『』《》〈〉“”‘’—…·")
-
-
 def normalize_question(text: str) -> str:
-    """Return the comparison form used for both questions and aliases."""
+    """Return a whitespace- and punctuation-free comparison form."""
     normalized = unicodedata.normalize("NFKC", text).lower()
     return "".join(
         character
         for character in normalized
-        if not character.isspace() and character not in _PUNCTUATION
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
     )
 
 

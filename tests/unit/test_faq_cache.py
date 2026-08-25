@@ -85,6 +85,10 @@ def test_normalize_question_removes_chinese_punctuation_and_whitespace():
     assert normalize_question("  介绍 一下调推中心？！\n") == "介绍一下调推中心"
 
 
+def test_normalize_question_removes_all_unicode_punctuation():
+    assert normalize_question("介绍八大车间。﹖‽؍") == "介绍八大车间"
+
+
 def test_normalize_question_handles_case_and_full_width_text():
     assert normalize_question(" ＡＩ　Why？ ") == "aiwhy"
 
