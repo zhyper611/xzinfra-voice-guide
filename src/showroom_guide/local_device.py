@@ -1,9 +1,5 @@
 import asyncio
-import io
 import logging
-import math
-import struct
-import wave
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from enum import StrEnum
@@ -19,7 +15,8 @@ from showroom_guide.device import (
     InvalidDeviceAudio,
     NO_SPEECH_MESSAGE,
     NoSpeechDetected,
-    validate_wav,
+    RecordingTooShort,
+    inspect_wav,
 )
 from showroom_guide.local_audio import (
     LocalAudioController,
@@ -202,13 +199,13 @@ class LocalDeviceWorkflow:
                 self._audio.play_stop_cue,
                 "stop",
             )
-            duration_seconds = self._wav_duration_seconds(captured)
+            metrics = inspect_wav(captured)
             self._last_recording = captured
-            if duration_seconds < self._min_recording_seconds:
-                raise InvalidDeviceAudio(
+            if metrics.duration_seconds < self._min_recording_seconds:
+                raise RecordingTooShort(
                     "录音时间太短，请听到开始提示音后再说话。"
                 )
-            if self._wav_dbfs(captured) < self._min_recording_dbfs:
+            if metrics.dbfs < self._min_recording_dbfs:
                 raise NoSpeechDetected(NO_SPEECH_MESSAGE)
         except NoSpeechDetected as error:
             await self._wait_for_cue(cue_task)
@@ -372,25 +369,3 @@ class LocalDeviceWorkflow:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
-
-    @staticmethod
-    def _wav_duration_seconds(audio: bytes) -> float:
-        validate_wav(audio)
-        with wave.open(io.BytesIO(audio), "rb") as source:
-            return source.getnframes() / source.getframerate()
-
-    @staticmethod
-    def _wav_dbfs(audio: bytes) -> float:
-        with wave.open(io.BytesIO(audio), "rb") as source:
-            frames = source.readframes(source.getnframes())
-        sample_count = len(frames) // 2
-        if sample_count == 0:
-            return -math.inf
-        square_sum = sum(
-            sample * sample
-            for (sample,) in struct.iter_unpack("<h", frames)
-        )
-        rms = math.sqrt(square_sum / sample_count)
-        if rms == 0:
-            return -math.inf
-        return 20 * math.log10(rms / 32768)

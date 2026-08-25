@@ -1,10 +1,14 @@
+import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import starlette.formparsers as starlette_formparsers
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from showroom_guide.controller import GuideServiceUnavailable, QuestionInProgress
 from showroom_guide.device import (
@@ -15,6 +19,14 @@ from showroom_guide.device import (
     NoSpeechDetected,
 )
 from showroom_guide.main import create_app
+from showroom_guide.knowledge_mode import KnowledgeModeState, KnowledgeProcessingStage
+from showroom_guide.knowledge_web import (
+    KnowledgeControlState,
+    KnowledgeEntrySnapshot,
+    KnowledgeSyncState,
+    KnowledgeWebError,
+    KnowledgeWebState,
+)
 from showroom_guide.local_audio import LocalAudioError
 from showroom_guide.local_device import LastRecordingNotFound
 from showroom_guide.models import GuidePhase, GuideSnapshot
@@ -24,13 +36,13 @@ from showroom_guide.sessions import SessionManager
 DEVICE_KEY = "device-test-key"
 
 
-def make_wav() -> bytes:
+def make_wav(frame_count: int = 160) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(16000)
-        audio.writeframes(b"\x00\x00" * 160)
+        audio.writeframes(b"\x00\x00" * frame_count)
     return output.getvalue()
 
 
@@ -76,6 +88,15 @@ class FakeRuntime:
         self.device_api_key = SecretStr(DEVICE_KEY)
         self.device_max_upload_bytes = 1024
         self.cleanup_seconds = 60.0
+        self.knowledge_web = MagicMock()
+        self.knowledge_web.acquire = AsyncMock()
+        self.knowledge_web.state = AsyncMock()
+        self.knowledge_web.short_press = AsyncMock()
+        self.knowledge_web.review_upload = AsyncMock()
+        self.knowledge_web.review_audio = AsyncMock()
+        self.knowledge_web.long_press = AsyncMock()
+        self.knowledge_web.release = AsyncMock()
+        self.knowledge_web.entry = AsyncMock()
         self.aclose = AsyncMock()
 
 
@@ -95,6 +116,18 @@ def authorized_headers() -> dict[str, str]:
         ("get", "/api/device/audio/audio-id", {}),
         ("post", "/api/device/playback-finished", {}),
         ("post", "/api/device/reset", {}),
+        ("post", "/api/device/knowledge/acquire", {}),
+        ("get", "/api/device/knowledge/state", {}),
+        ("post", "/api/device/knowledge/short-press", {}),
+        (
+            "post",
+            "/api/device/knowledge/upload",
+            {"files": {"file": ("knowledge.wav", make_wav(), "audio/wav")}},
+        ),
+        ("get", "/api/device/knowledge/review-audio", {}),
+        ("post", "/api/device/knowledge/long-press", {}),
+        ("post", "/api/device/knowledge/release", {}),
+        ("get", "/api/device/knowledge/entries/entry-id", {}),
     ],
 )
 @pytest.mark.parametrize("provided_key", [None, "wrong-device-key"])
@@ -408,3 +441,668 @@ def test_device_reset_rejects_busy_session():
 
     assert response.status_code == 409
     assert response.json()["detail"] == "设备问题正在处理中，暂时不能重置"
+
+
+def knowledge_state(
+    *,
+    enabled: bool = True,
+    mode_state: KnowledgeModeState = KnowledgeModeState.READY,
+    processing_stage: KnowledgeProcessingStage | None = None,
+    control_state: KnowledgeControlState = KnowledgeControlState.OWNED,
+    lease_expires_at: float | None = 1234.5,
+    draft_text: str | None = None,
+    last_entry_id: str | None = None,
+) -> KnowledgeWebState:
+    return KnowledgeWebState(
+        enabled=enabled,
+        mode_state=mode_state,
+        processing_stage=processing_stage,
+        control_state=control_state,
+        lease_expires_at=lease_expires_at,
+        draft_text=draft_text,
+        last_entry_id=last_entry_id,
+    )
+
+
+def knowledge_headers(lease_token: str | None = None) -> dict[str, str]:
+    headers = authorized_headers()
+    if lease_token is not None:
+        headers["X-Knowledge-Lease"] = lease_token
+    return headers
+
+
+def test_knowledge_acquire_returns_lease_and_serialized_state_without_device_key():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.acquire.return_value = (
+        "lease-token",
+        knowledge_state(draft_text="待确认知识"),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/acquire",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "lease_token": "lease-token",
+        "knowledge_state": {
+            "enabled": True,
+            "mode_state": "ready",
+            "processing_stage": None,
+            "control_state": "owned",
+            "lease_expires_at": 1234.5,
+            "draft_text": "待确认知识",
+            "last_entry_id": None,
+        },
+    }
+    assert DEVICE_KEY not in response.text
+    runtime.knowledge_web.acquire.assert_awaited_once_with()
+
+
+def test_second_knowledge_acquire_returns_busy_observer_state_with_redacted_draft():
+    runtime = FakeRuntime()
+    observer = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        processing_stage=KnowledgeProcessingStage.SYNTHESIZING,
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+        draft_text=None,
+    )
+    runtime.knowledge_web.acquire.side_effect = KnowledgeWebError(
+        "knowledge_control_busy",
+        "知识补充功能正由其他页面控制",
+        409,
+        observer,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/acquire",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "knowledge_control_busy",
+        "detail": "知识补充功能正由其他页面控制",
+        "knowledge_state": {
+            "enabled": True,
+            "mode_state": "confirming",
+            "processing_stage": "synthesizing",
+            "control_state": "observed",
+            "lease_expires_at": None,
+            "draft_text": None,
+            "last_entry_id": None,
+        },
+    }
+
+
+def test_knowledge_acquire_returns_disabled_error_code():
+    runtime = FakeRuntime()
+    disabled = knowledge_state(
+        enabled=False,
+        mode_state=KnowledgeModeState.INACTIVE,
+        control_state=KnowledgeControlState.AVAILABLE,
+        lease_expires_at=None,
+    )
+    runtime.knowledge_web.acquire.side_effect = KnowledgeWebError(
+        "knowledge_capture_disabled",
+        "知识补充功能未启用",
+        503,
+        disabled,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/acquire",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "knowledge_capture_disabled"
+    assert response.json()["knowledge_state"]["enabled"] is False
+    assert isinstance(response.json()["detail"], str)
+
+
+def test_knowledge_state_allows_observer_without_lease_and_redacts_owner_fields():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.state.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        processing_stage=KnowledgeProcessingStage.PLAYING_REVIEW,
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+        draft_text=None,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/state",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["control_state"] == "observed"
+    assert response.json()["processing_stage"] == "playing_review"
+    assert response.json()["lease_expires_at"] is None
+    assert response.json()["draft_text"] is None
+    runtime.knowledge_web.state.assert_awaited_once_with(None)
+
+
+def test_knowledge_upload_returns_state_and_review_audio_url_without_secrets():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.review_upload.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        draft_text="待确认知识",
+    )
+    source = make_wav()
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", source, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "knowledge_state": {
+            "enabled": True,
+            "mode_state": "confirming",
+            "processing_stage": None,
+            "control_state": "owned",
+            "lease_expires_at": 1234.5,
+            "draft_text": "待确认知识",
+            "last_entry_id": None,
+        },
+        "review_audio_url": "/api/device/knowledge/review-audio",
+    }
+    assert DEVICE_KEY not in response.text
+    assert "lease-token" not in response.text
+    runtime.knowledge_web.review_upload.assert_awaited_once_with(
+        "lease-token",
+        source,
+    )
+
+
+def test_knowledge_upload_authenticates_before_parsing_multipart(monkeypatch):
+    runtime = FakeRuntime()
+    parse_calls = 0
+    original_parse = MultiPartParser.parse
+
+    async def track_parse(parser):
+        nonlocal parse_calls
+        parse_calls += 1
+        return await original_parse(parser)
+
+    monkeypatch.setattr(MultiPartParser, "parse", track_parse)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers={"X-Device-Key": "wrong-device-key"},
+            files={"file": ("knowledge.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == 401
+    assert parse_calls == 0
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+def test_knowledge_review_audio_is_wav_and_not_cached():
+    runtime = FakeRuntime()
+    review_audio = make_wav()
+    runtime.knowledge_web.review_audio.return_value = review_audio
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/review-audio",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 200
+    assert response.content == review_audio
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.headers["cache-control"] == "no-store"
+    assert DEVICE_KEY not in response.text
+    assert "lease-token" not in response.text
+    runtime.knowledge_web.review_audio.assert_awaited_once_with("lease-token")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "web_method", "request_kwargs"),
+    [
+        (
+            "post",
+            "/api/device/knowledge/upload",
+            "review_upload",
+            {"files": {"file": ("knowledge.wav", make_wav(), "audio/wav")}},
+        ),
+        (
+            "get",
+            "/api/device/knowledge/review-audio",
+            "review_audio",
+            {},
+        ),
+    ],
+)
+@pytest.mark.parametrize("lease_token", [None, "wrong-lease"])
+def test_knowledge_audio_routes_reject_missing_or_wrong_lease(
+    method,
+    path,
+    web_method,
+    request_kwargs,
+    lease_token,
+):
+    runtime = FakeRuntime()
+    error_state = knowledge_state(
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+    )
+    runtime.knowledge_web.state.return_value = error_state
+    operation = getattr(runtime.knowledge_web, web_method)
+    operation.side_effect = KnowledgeWebError(
+        "knowledge_lease_expired",
+        "知识补充控制权已过期",
+        409,
+        error_state,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = getattr(client, method)(
+            path,
+            headers=knowledge_headers(lease_token),
+            **request_kwargs,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "knowledge_lease_expired"
+    assert response.json()["knowledge_state"]["control_state"] == "observed"
+    if lease_token is None:
+        runtime.knowledge_web.state.assert_awaited_once_with()
+        operation.assert_not_awaited()
+    elif web_method == "review_upload":
+        operation.assert_awaited_once_with("wrong-lease", make_wav())
+    else:
+        operation.assert_awaited_once_with("wrong-lease")
+
+
+def test_knowledge_upload_rejects_oversized_file_and_closes_upload(monkeypatch):
+    runtime = FakeRuntime()
+    closed_filenames = []
+    original_close = StarletteUploadFile.close
+
+    async def track_close(upload):
+        closed_filenames.append(upload.filename)
+        await original_close(upload)
+
+    monkeypatch.setattr(StarletteUploadFile, "close", track_close)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", b"x" * 1025, "audio/wav")},
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "录音文件过大"}
+    assert "knowledge.wav" in closed_filenames
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+def test_knowledge_upload_keeps_large_wav_in_memory_and_closes_upload(
+    monkeypatch,
+):
+    runtime = FakeRuntime()
+    runtime.device_max_upload_bytes = 2 * 1024 * 1024
+    runtime.knowledge_web.review_upload.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.CONFIRMING,
+        draft_text="待确认知识",
+    )
+    source = make_wav(frame_count=600_000)
+    created_tempfiles = []
+    original_spooled_tempfile = starlette_formparsers.SpooledTemporaryFile
+
+    def track_spooled_tempfile(*args, **kwargs):
+        tempfile = original_spooled_tempfile(*args, **kwargs)
+        created_tempfiles.append(tempfile)
+        return tempfile
+
+    monkeypatch.setattr(
+        starlette_formparsers,
+        "SpooledTemporaryFile",
+        track_spooled_tempfile,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", source, "audio/wav")},
+        )
+
+    assert 1024 * 1024 < len(source) < runtime.device_max_upload_bytes
+    assert response.status_code == 200
+    assert created_tempfiles
+    assert all(not tempfile._rolled for tempfile in created_tempfiles)
+    assert all(tempfile.closed for tempfile in created_tempfiles)
+    runtime.knowledge_web.review_upload.assert_awaited_once_with(
+        "lease-token",
+        source,
+    )
+
+
+def test_knowledge_upload_rejects_streaming_request_body_over_hard_limit(
+    monkeypatch,
+):
+    runtime = FakeRuntime()
+    boundary = "streaming-boundary"
+    payload = b"x" * (runtime.device_max_upload_bytes + 64 * 1024)
+    preamble = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="knowledge.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+    ).encode()
+    closing = f"\r\n--{boundary}--\r\n".encode()
+    parser_headers = []
+    parser_errors = []
+    created_tempfiles = []
+    read_calls = 0
+    original_parse = MultiPartParser.parse
+    original_read = StarletteUploadFile.read
+    original_spooled_tempfile = starlette_formparsers.SpooledTemporaryFile
+
+    def track_spooled_tempfile(*args, **kwargs):
+        tempfile = original_spooled_tempfile(*args, **kwargs)
+        created_tempfiles.append(tempfile)
+        return tempfile
+
+    async def track_parse(parser):
+        parser_headers.append(parser.headers)
+        try:
+            return await original_parse(parser)
+        except BaseException as error:
+            parser_errors.append(error)
+            raise
+
+    async def track_read(upload, size=-1):
+        nonlocal read_calls
+        read_calls += 1
+        return await original_read(upload, size)
+
+    monkeypatch.setattr(MultiPartParser, "parse", track_parse)
+    monkeypatch.setattr(StarletteUploadFile, "read", track_read)
+    monkeypatch.setattr(
+        starlette_formparsers,
+        "SpooledTemporaryFile",
+        track_spooled_tempfile,
+    )
+
+    async def invoke_streaming_request():
+        chunks = iter([preamble + payload[:1], payload[1:] + closing])
+        messages = []
+
+        async def receive():
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": chunk, "more_body": True}
+
+        async def send(message):
+            messages.append(message)
+
+        await create_app(runtime)(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/device/knowledge/upload",
+                "raw_path": b"/api/device/knowledge/upload",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"x-device-key", DEVICE_KEY.encode()),
+                    (b"x-knowledge-lease", b"lease-token"),
+                    (
+                        b"content-type",
+                        f"multipart/form-data; boundary={boundary}".encode(),
+                    ),
+                ],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+                "root_path": "",
+                "state": {},
+            },
+            receive,
+            send,
+        )
+        return messages
+
+    messages = asyncio.run(invoke_streaming_request())
+    response_start = next(
+        message for message in messages if message["type"] == "http.response.start"
+    )
+
+    assert response_start["status"] == 413
+    assert parser_headers
+    assert "content-length" not in parser_headers[0]
+    assert len(parser_errors) == 1
+    assert isinstance(parser_errors[0], MultiPartException)
+    assert created_tempfiles
+    assert all(tempfile.closed for tempfile in created_tempfiles)
+    assert read_calls == 0
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("headers", "request_kwargs"),
+    [
+        (
+            {"Content-Type": "multipart/form-data"},
+            {"content": b"missing-boundary"},
+        ),
+        (
+            {},
+            {"files": {"other": ("knowledge.wav", make_wav(), "audio/wav")}},
+        ),
+    ],
+    ids=["malformed-multipart", "missing-file"],
+)
+def test_knowledge_upload_rejects_invalid_multipart(headers, request_kwargs):
+    runtime = FakeRuntime()
+    request_headers = knowledge_headers("lease-token")
+    request_headers.update(headers)
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=request_headers,
+            **request_kwargs,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "上传表单格式无效"}
+    runtime.knowledge_web.review_upload.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        (
+            KnowledgeWebError(
+                "invalid_audio",
+                "必须上传有效的 WAV 文件",
+                415,
+                knowledge_state(),
+            ),
+            415,
+        ),
+        (
+            KnowledgeWebError(
+                "knowledge_operation_invalid_state",
+                "知识补充模式当前无法处理上传",
+                409,
+                knowledge_state(mode_state=KnowledgeModeState.CONFIRMING),
+            ),
+            409,
+        ),
+    ],
+)
+def test_knowledge_upload_maps_controller_error(error, status_code):
+    runtime = FakeRuntime()
+    runtime.knowledge_web.review_upload.side_effect = error
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/upload",
+            headers=knowledge_headers("lease-token"),
+            files={"file": ("knowledge.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == status_code
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["code"] == error.code
+    assert response.json()["detail"] == error.detail
+    assert DEVICE_KEY not in response.text
+    assert "lease-token" not in response.text
+
+
+def test_missing_knowledge_review_audio_maps_controller_error():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.review_audio.side_effect = KnowledgeWebError(
+        "knowledge_review_not_found",
+        "知识复述语音不存在",
+        404,
+        knowledge_state(),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/review-audio",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["code"] == "knowledge_review_not_found"
+    assert response.json()["detail"] == "知识复述语音不存在"
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name"),
+    [
+        ("/api/device/knowledge/short-press", "short_press"),
+        ("/api/device/knowledge/long-press", "long_press"),
+        ("/api/device/knowledge/release", "release"),
+    ],
+)
+@pytest.mark.parametrize("lease_token", [None, "wrong-lease"])
+def test_knowledge_control_rejects_missing_or_wrong_lease_with_domain_error(
+    path,
+    method_name,
+    lease_token,
+):
+    runtime = FakeRuntime()
+    method = getattr(runtime.knowledge_web, method_name)
+    error_state = knowledge_state(
+        control_state=KnowledgeControlState.OBSERVED,
+        lease_expires_at=None,
+    )
+    runtime.knowledge_web.state.return_value = error_state
+    method.side_effect = KnowledgeWebError(
+        "knowledge_lease_expired",
+        "知识补充控制权已过期",
+        409,
+        error_state,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(path, headers=knowledge_headers(lease_token))
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "knowledge_lease_expired"
+    assert response.json()["detail"] == "知识补充控制权已过期"
+    assert response.json()["knowledge_state"]["control_state"] == "observed"
+    if lease_token is None:
+        runtime.knowledge_web.state.assert_awaited_once_with()
+        method.assert_not_awaited()
+    else:
+        method.assert_awaited_once_with(lease_token)
+
+
+def test_knowledge_long_press_returns_saved_entry_id():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.long_press.return_value = knowledge_state(
+        mode_state=KnowledgeModeState.INACTIVE,
+        control_state=KnowledgeControlState.AVAILABLE,
+        lease_expires_at=None,
+        last_entry_id="saved-entry",
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/long-press",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["last_entry_id"] == "saved-entry"
+    assert response.json()["control_state"] == "available"
+    runtime.knowledge_web.long_press.assert_awaited_once_with("lease-token")
+
+
+def test_knowledge_entry_returns_sync_snapshot_without_requiring_lease():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.entry.return_value = KnowledgeEntrySnapshot(
+        entry_id="saved-entry",
+        sync_state=KnowledgeSyncState.SYNCED,
+        attempts=2,
+        last_error=None,
+        next_attempt_at=1200.0,
+        updated_at=1300.0,
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.get(
+            "/api/device/knowledge/entries/saved-entry",
+            headers=authorized_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "entry_id": "saved-entry",
+        "sync_state": "synced",
+        "attempts": 2,
+        "last_error": None,
+        "next_attempt_at": 1200.0,
+        "updated_at": 1300.0,
+    }
+    runtime.knowledge_web.entry.assert_awaited_once_with("saved-entry")
+
+
+def test_knowledge_controller_error_uses_top_level_structured_payload():
+    runtime = FakeRuntime()
+    runtime.knowledge_web.short_press.side_effect = KnowledgeWebError(
+        "asr_unavailable",
+        "语音识别暂时不可用",
+        503,
+        knowledge_state(draft_text="不会丢失的草稿"),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/knowledge/short-press",
+            headers=knowledge_headers("lease-token"),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "asr_unavailable"
+    assert response.json()["detail"] == "语音识别暂时不可用"
+    assert response.json()["knowledge_state"]["draft_text"] == "不会丢失的草稿"
+    assert isinstance(response.json()["detail"], str)

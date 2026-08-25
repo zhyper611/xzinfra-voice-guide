@@ -53,7 +53,7 @@ class KnowledgeSyncService:
                 if entry.state is OutboxState.UPLOADING:
                     state = await self._client.document_state(entry.filename)
                     if state is DocumentProcessingState.SUCCESS:
-                        self._outbox.delete(entry.id)
+                        self._mark_synced(entry.id)
                         continue
                     if state is DocumentProcessingState.PENDING:
                         self._outbox.mark_uploaded(
@@ -69,7 +69,7 @@ class KnowledgeSyncService:
                     continue
                 state = await self._client.document_state(entry.filename)
                 if state is DocumentProcessingState.SUCCESS:
-                    self._outbox.delete(entry.id)
+                    self._mark_synced(entry.id)
                 elif state is DocumentProcessingState.FAILURE:
                     self._outbox.mark_failed(
                         entry.id,
@@ -128,3 +128,13 @@ class KnowledgeSyncService:
             self._poll_seconds * (2**attempts),
             self._max_backoff_seconds,
         )
+
+    def _mark_synced(self, entry_id: str) -> None:
+        self._outbox.mark_synced(entry_id)
+        try:
+            self._outbox.prune_synced(keep=50)
+        except Exception:
+            logger.warning(
+                "knowledge_sync_prune_failed",
+                extra={"entry_id": entry_id},
+            )

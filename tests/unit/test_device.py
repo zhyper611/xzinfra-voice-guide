@@ -1,5 +1,6 @@
 import asyncio
 import io
+import math
 import wave
 from unittest.mock import AsyncMock
 
@@ -13,8 +14,10 @@ from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceVoiceSession,
     InvalidDeviceAudio,
+    InvalidWavFormat,
     NO_SPEECH_MESSAGE,
     NoSpeechDetected,
+    inspect_wav,
     validate_wav,
 )
 from showroom_guide.models import GuidePhase
@@ -26,13 +29,16 @@ def make_wav(
     channels: int = 1,
     sample_width: int = 2,
     sample_rate: int = 16000,
+    frames: int = 160,
+    sample: int = 0,
 ) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
         audio.setnchannels(channels)
         audio.setsampwidth(sample_width)
         audio.setframerate(sample_rate)
-        audio.writeframes(b"\x00" * sample_width * channels * 160)
+        frame = int(sample).to_bytes(sample_width, "little", signed=True)
+        audio.writeframes(frame * channels * frames)
     return output.getvalue()
 
 
@@ -79,26 +85,44 @@ def make_session(speech=None):
     ("audio", "message"),
     [
         (b"not-a-wave", "WAV"),
+        (b"RIFF\x04\x00\x00\x00WAVE", "损坏"),
         (make_wav(channels=2), "单声道"),
         (make_wav(sample_width=1), "16-bit"),
         (make_wav(sample_rate=8000), "16 kHz"),
     ],
 )
 def test_validate_wav_rejects_invalid_audio(audio, message):
-    with pytest.raises(InvalidDeviceAudio, match=message):
+    with pytest.raises(InvalidWavFormat, match=message) as caught:
         validate_wav(audio)
+
+    assert isinstance(caught.value, InvalidDeviceAudio)
 
 
 def test_validate_wav_accepts_16khz_16bit_mono_pcm():
     validate_wav(make_wav())
 
 
+def test_inspect_wav_returns_duration_and_dbfs():
+    metrics = inspect_wav(make_wav(frames=16000, sample=8192))
+
+    assert metrics.duration_seconds == pytest.approx(1.0)
+    assert metrics.dbfs == pytest.approx(-12.04, abs=0.1)
+
+
+def test_inspect_wav_returns_negative_infinity_for_silence():
+    metrics = inspect_wav(make_wav(sample=0))
+
+    assert metrics.dbfs == -math.inf
+
+
 def test_validate_wav_rejects_compressed_format():
     audio = bytearray(make_wav())
     audio[20:22] = (3).to_bytes(2, "little")
 
-    with pytest.raises(InvalidDeviceAudio, match="PCM"):
+    with pytest.raises(InvalidWavFormat, match="PCM") as caught:
         validate_wav(bytes(audio))
+
+    assert isinstance(caught.value, InvalidDeviceAudio)
 
 
 @pytest.mark.asyncio

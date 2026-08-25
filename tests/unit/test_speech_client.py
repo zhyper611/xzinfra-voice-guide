@@ -1,4 +1,5 @@
 import io
+import logging
 
 import httpx
 import pytest
@@ -92,6 +93,34 @@ async def test_asr_retries_one_transient_transport_failure():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_asr_logs_each_attempt_without_request_content(caplog):
+    route = respx.post("http://models.test/audio/transcriptions").mock(
+        side_effect=[
+            httpx.ReadTimeout("temporary timeout"),
+            httpx.Response(200, json={"text": "敏感问题内容"}),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="showroom_guide.clients.speech")
+
+    async with make_client() as client:
+        await client.transcribe(io.BytesIO(b"RIFF-private-audio"))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "service=asr attempt=1 outcome=error" in message
+        and "error=ReadTimeout" in message
+        for message in messages
+    )
+    assert any(
+        "service=asr attempt=2 outcome=success" in message
+        for message in messages
+    )
+    assert all("敏感问题内容" not in message for message in messages)
+    assert all("RIFF-private-audio" not in message for message in messages)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_tts_requests_wav():
     wav = b"RIFF\x04\x00\x00\x00WAVE"
     route = respx.post("http://models.test/audio/speech").mock(
@@ -105,6 +134,27 @@ async def test_tts_requests_wav():
     assert request.headers["Authorization"] == "Bearer tts-key"
     assert b'"response_format":"wav"' in request.content
     assert audio == wav
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_tts_logs_input_length_without_text(caplog):
+    wav = b"RIFF\x04\x00\x00\x00WAVE"
+    respx.post("http://models.test/audio/speech").mock(
+        return_value=httpx.Response(200, content=wav)
+    )
+    caplog.set_level(logging.INFO, logger="showroom_guide.clients.speech")
+
+    async with make_client() as client:
+        await client.synthesize("欢迎参观")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "service=tts attempt=1 outcome=success" in message
+        and "input_chars=4" in message
+        for message in messages
+    )
+    assert all("欢迎参观" not in message for message in messages)
 
 
 @pytest.mark.asyncio
@@ -135,6 +185,20 @@ async def test_tts_retries_one_transient_server_failure():
 
     assert audio == wav
     assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_tts_does_not_retry_read_timeout():
+    route = respx.post("http://models.test/audio/speech").mock(
+        side_effect=httpx.ReadTimeout("upstream stalled")
+    )
+
+    async with make_client() as client:
+        with pytest.raises(httpx.ReadTimeout):
+            await client.synthesize("欢迎参观")
+
+    assert route.call_count == 1
 
 
 @pytest.mark.asyncio

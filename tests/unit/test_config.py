@@ -44,6 +44,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.tts_base_url == "http://tts.test"
     assert settings.ptt_pin == 17
     assert settings.first_audio_timeout_seconds == 5.0
+    assert settings.asr_timeout_seconds == 8.0
+    assert settings.tts_timeout_seconds == 12.0
     assert settings.playback_timeout_seconds == 300.0
     assert settings.knowledge_outbox_path == (
         Path.home()
@@ -68,6 +70,7 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.local_recording_max_seconds == 60.0
     assert settings.local_recording_min_seconds == 0.5
     assert settings.local_recording_min_dbfs == -45.0
+    assert settings.knowledge_web_lease_seconds == 120.0
 
 
 def test_settings_reads_multi_user_overrides(monkeypatch):
@@ -89,6 +92,9 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     monkeypatch.setenv("GUIDE_FAQ_CACHE_FILE", "custom/faq-cache.yaml")
     monkeypatch.setenv("GUIDE_FAQ_PREPARED_AUDIO_ENABLED", "false")
     monkeypatch.setenv("GUIDE_LOCAL_RECORDING_MIN_DBFS", "-50")
+    monkeypatch.setenv("GUIDE_KNOWLEDGE_WEB_LEASE_SECONDS", "45.5")
+    monkeypatch.setenv("GUIDE_ASR_TIMEOUT_SECONDS", "6.5")
+    monkeypatch.setenv("GUIDE_TTS_TIMEOUT_SECONDS", "10.5")
 
     settings = Settings(_env_file=None)
 
@@ -100,6 +106,27 @@ def test_settings_reads_multi_user_overrides(monkeypatch):
     assert settings.faq_cache_file == Path("custom/faq-cache.yaml")
     assert settings.faq_prepared_audio_enabled is False
     assert settings.local_recording_min_dbfs == -50.0
+    assert settings.knowledge_web_lease_seconds == 45.5
+    assert settings.asr_timeout_seconds == 6.5
+    assert settings.tts_timeout_seconds == 10.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_settings_rejects_non_positive_knowledge_web_lease(monkeypatch, value):
+    monkeypatch.setenv("GUIDE_XZKB_BASE_URL", "http://xzkb.test")
+    monkeypatch.setenv("GUIDE_XZKB_API_KEY", "test-key")
+    monkeypatch.setenv("GUIDE_XZKB_EMPTY_SEARCH_RESPONSE", "请询问展厅相关内容。")
+    monkeypatch.setenv("GUIDE_ASR_BASE_URL", "http://asr.test")
+    monkeypatch.setenv("GUIDE_ASR_API_KEY", "asr-test-key")
+    monkeypatch.setenv("GUIDE_ASR_MODEL", "company-asr")
+    monkeypatch.setenv("GUIDE_TTS_BASE_URL", "http://tts.test")
+    monkeypatch.setenv("GUIDE_TTS_API_KEY", "tts-test-key")
+    monkeypatch.setenv("GUIDE_TTS_MODEL", "company-tts")
+    monkeypatch.setenv("GUIDE_DEVICE_API_KEY", "device-test-key")
+    monkeypatch.setenv("GUIDE_KNOWLEDGE_WEB_LEASE_SECONDS", value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_settings_rejects_non_positive_device_upload_limit(monkeypatch):
@@ -241,3 +268,4 @@ def test_example_environment_is_valid_with_optional_features_disabled():
 
     assert settings.knowledge_capture_enabled is False
     assert settings.gpio_button_enabled is False
+    assert settings.knowledge_web_lease_seconds == 120.0
