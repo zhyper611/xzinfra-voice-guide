@@ -94,6 +94,7 @@ class StatefulKnowledge:
         self.saved_entry = KnowledgeEntry(
             id="entry-id",
             content="展厅知识正文",
+            title="展厅知识",
             filename="entry.md",
             state=OutboxState.PENDING,
             attempts=0,

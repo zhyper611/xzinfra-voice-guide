@@ -66,7 +66,7 @@ class XzkbKnowledgeClient:
         if self._folder_id:
             fields["folder_id"] = self._folder_id
         markdown = (
-            f"# 语音补充知识\n\n{entry.content}\n\n来源：树莓派语音补充\n"
+            f"# {entry.title}\n\n{entry.content}\n\n来源：树莓派语音补充\n"
         ).encode("utf-8")
 
         async def send(token: str) -> httpx.Response:

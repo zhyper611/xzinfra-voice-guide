@@ -1,11 +1,33 @@
+import re
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Callable
+
+
+FALLBACK_KNOWLEDGE_TITLE = "语音补充知识"
+MAX_KNOWLEDGE_TITLE_LENGTH = 24
+
+
+def derive_knowledge_title(content: str) -> str:
+    normalized = re.sub(r"\s+", " ", content).strip()
+    normalized = re.sub(
+        r"^(?:请记住|请记录|补充一下|我想补充(?:一下)?|我想说明(?:一下)?|这里补充(?:一下)?)[，,。.!！?？：:、\s]*",
+        "",
+        normalized,
+    )
+    candidate = re.split(r"[。.!！?？；;\n]", normalized, maxsplit=1)[0]
+    candidate = re.sub(r"[<>:\"/\\|?*#\x00-\x1f]", "", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip(
+        " ，,。.!！?？；;：:、-_"
+    )
+    return (
+        candidate[:MAX_KNOWLEDGE_TITLE_LENGTH].strip()
+        or FALLBACK_KNOWLEDGE_TITLE
+    )
 
 
 class OutboxState(StrEnum):
@@ -19,6 +41,7 @@ class OutboxState(StrEnum):
 class KnowledgeEntry:
     id: str
     content: str
+    title: str
     filename: str
     state: OutboxState
     attempts: int
@@ -45,14 +68,12 @@ class KnowledgeOutbox:
             raise ValueError("知识内容不能为空")
         entry_id = uuid.uuid4().hex
         now = self._clock()
-        timestamp = datetime.fromtimestamp(
-            now,
-            tz=timezone.utc,
-        ).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"voice-knowledge-{timestamp}-{entry_id}.md"
+        title = derive_knowledge_title(normalized)
+        filename = f"{title}-{entry_id[:6]}.md"
         entry = KnowledgeEntry(
             id=entry_id,
             content=normalized,
+            title=title,
             filename=filename,
             state=OutboxState.PENDING,
             attempts=0,
@@ -64,13 +85,14 @@ class KnowledgeOutbox:
             connection.execute(
                 """
                 INSERT INTO knowledge_outbox (
-                    id, content, filename, state, attempts,
+                    id, content, title, filename, state, attempts,
                     next_attempt_at, last_error, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.id,
                     entry.content,
+                    entry.title,
                     entry.filename,
                     entry.state.value,
                     entry.attempts,
@@ -85,7 +107,7 @@ class KnowledgeOutbox:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, content, filename, state, attempts,
+                SELECT id, content, title, filename, state, attempts,
                        next_attempt_at, last_error, updated_at
                 FROM knowledge_outbox
                 WHERE next_attempt_at <= ? AND state != ?
@@ -100,7 +122,7 @@ class KnowledgeOutbox:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, content, filename, state, attempts,
+                SELECT id, content, title, filename, state, attempts,
                        next_attempt_at, last_error, updated_at
                 FROM knowledge_outbox
                 WHERE id = ?
@@ -209,6 +231,7 @@ class KnowledgeOutbox:
                 CREATE TABLE IF NOT EXISTS knowledge_outbox (
                     id TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
+                    title TEXT NOT NULL,
                     filename TEXT NOT NULL UNIQUE,
                     state TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0,
@@ -227,6 +250,22 @@ class KnowledgeOutbox:
             if "updated_at" not in columns:
                 connection.execute(
                     "ALTER TABLE knowledge_outbox ADD COLUMN updated_at REAL"
+                )
+            if "title" not in columns:
+                connection.execute(
+                    "ALTER TABLE knowledge_outbox ADD COLUMN title TEXT"
+                )
+            rows_without_title = connection.execute(
+                """
+                SELECT id, content
+                FROM knowledge_outbox
+                WHERE title IS NULL OR TRIM(title) = ''
+                """
+            ).fetchall()
+            for entry_id, content in rows_without_title:
+                connection.execute(
+                    "UPDATE knowledge_outbox SET title = ? WHERE id = ?",
+                    (derive_knowledge_title(str(content)), str(entry_id)),
                 )
             connection.execute(
                 """
@@ -277,10 +316,11 @@ class KnowledgeOutbox:
         return KnowledgeEntry(
             id=str(row[0]),
             content=str(row[1]),
-            filename=str(row[2]),
-            state=OutboxState(str(row[3])),
-            attempts=int(row[4]),
-            next_attempt_at=float(row[5]),
-            last_error=str(row[6]) if row[6] is not None else None,
-            updated_at=float(row[7]),
+            title=str(row[2]),
+            filename=str(row[3]),
+            state=OutboxState(str(row[4])),
+            attempts=int(row[5]),
+            next_attempt_at=float(row[6]),
+            last_error=str(row[7]) if row[7] is not None else None,
+            updated_at=float(row[8]),
         )

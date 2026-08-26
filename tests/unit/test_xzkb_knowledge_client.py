@@ -21,6 +21,7 @@ def make_entry(state=OutboxState.PENDING):
     return KnowledgeEntry(
         id="entry-id",
         content="总装车间采用柔性生产线。",
+        title="总装车间柔性生产线",
         filename="voice-knowledge-entry-id.md",
         state=state,
         attempts=0,
@@ -62,6 +63,7 @@ async def test_upload_uses_stable_multipart_endpoint_and_checks_business_code():
     assert b"voice-knowledge-entry-id.md" in request.content
     assert b"11111111-1111-1111-1111-111111111111" in request.content
     assert b"22222222-2222-2222-2222-222222222222" in request.content
+    assert "# 总装车间柔性生产线".encode() in request.content
     assert "总装车间采用柔性生产线".encode() in request.content
     auth.token.assert_awaited_once_with()
 

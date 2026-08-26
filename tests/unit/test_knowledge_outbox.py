@@ -2,7 +2,11 @@ import sqlite3
 
 import pytest
 
-from showroom_guide.knowledge_outbox import KnowledgeOutbox, OutboxState
+from showroom_guide.knowledge_outbox import (
+    KnowledgeOutbox,
+    OutboxState,
+    derive_knowledge_title,
+)
 
 
 class Clock:
@@ -10,6 +14,27 @@ class Clock:
 
     def __call__(self) -> float:
         return self.now
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            "总装车间采用柔性生产线。还能兼容多种车型。",
+            "总装车间采用柔性生产线",
+        ),
+        ("我想补充一下，总装车间支持柔性生产。", "总装车间支持柔性生产"),
+        ("请记住：A/B 产线用于试制。", "AB 产线用于试制"),
+        ("补充一下，  总装车间   支持柔性生产。", "总装车间 支持柔性生产"),
+        ("   ###   ", "语音补充知识"),
+    ],
+)
+def test_derive_knowledge_title(content, expected):
+    assert derive_knowledge_title(content) == expected
+
+
+def test_derive_knowledge_title_limits_length():
+    assert len(derive_knowledge_title("总装车间" * 20)) == 24
 
 
 def test_pending_entry_survives_reopen(tmp_path):
@@ -26,8 +51,23 @@ def test_pending_entry_survives_reopen(tmp_path):
     assert len(stored) == 1
     assert stored[0].id == entry.id
     assert stored[0].content == "总装车间采用柔性生产线。"
+    assert stored[0].title == "总装车间采用柔性生产线"
+    assert stored[0].filename.startswith("总装车间采用柔性生产线-")
     assert stored[0].filename.endswith(".md")
+    assert stored[0].filename == entry.filename
     assert stored[0].state is OutboxState.PENDING
+
+
+def test_same_content_uses_same_title_and_unique_filenames(tmp_path):
+    outbox = KnowledgeOutbox(tmp_path / "knowledge.sqlite3", clock=Clock())
+
+    first = outbox.enqueue("总装车间采用柔性生产线。")
+    second = outbox.enqueue("总装车间采用柔性生产线。")
+
+    assert first.title == second.title == "总装车间采用柔性生产线"
+    assert first.filename != second.filename
+    assert first.filename.startswith(f"{first.title}-")
+    assert len(first.filename.removeprefix(f"{first.title}-").removesuffix(".md")) == 6
 
 
 def test_uploaded_entry_is_retained_until_remote_processing_succeeds(tmp_path):
@@ -103,6 +143,8 @@ def test_existing_database_adds_and_backfills_updated_at(tmp_path):
 
     assert entry is not None
     assert entry.updated_at == 2000.0
+    assert entry.title == "旧知识"
+    assert entry.filename == "legacy.md"
 
 
 def test_existing_nullable_updated_at_is_backfilled_after_interrupted_migration(
