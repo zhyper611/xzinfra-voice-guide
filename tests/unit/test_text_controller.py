@@ -307,7 +307,7 @@ async def test_unanchored_reference_asks_for_exhibit_without_calling_xzkb():
 
 
 @pytest.mark.asyncio
-async def test_oversized_xzkb_answer_is_bounded_and_stream_is_closed():
+async def test_long_xzkb_answer_is_consumed_and_preserved_in_full():
     controller, state, xzkb, speech = make_controller()
     stream_closed = asyncio.Event()
 
@@ -323,11 +323,15 @@ async def test_oversized_xzkb_answer_is_bounded_and_stream_is_closed():
 
     result = await controller.ask_text("介绍矿山巡检系统")
 
-    assert len(result.answer) <= 1001
-    assert result.answer.endswith("……")
+    expected_answer = "甲" * 800 + "乙" * 800
+    assert result.answer == expected_answer
     assert state.snapshot.answer == result.answer
     assert stream_closed.is_set()
-    speech.synthesize.assert_awaited_once_with(result.answer)
+    assert controller._messages[-1] == {
+        "role": "assistant",
+        "content": expected_answer,
+    }
+    speech.synthesize.assert_awaited_once_with(expected_answer)
 
 
 @pytest.mark.asyncio

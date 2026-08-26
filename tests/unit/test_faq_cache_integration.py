@@ -264,7 +264,7 @@ async def test_cache_hit_uses_fixed_answer_skips_xzkb_and_calls_tts(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_cache_hit_bounds_answer_before_display_context_and_tts(tmp_path: Path):
+async def test_cache_hit_preserves_full_answer_for_display_context_and_tts(tmp_path: Path):
     long_answer = "讲解内容" * 50
     path = write_cache(tmp_path, [cache_entry(answer=long_answer)])
     xzkb = MagicMock()
@@ -278,14 +278,13 @@ async def test_cache_hit_bounds_answer_before_display_context_and_tts(tmp_path: 
 
     result = await controller.ask_text("固定问题")
 
-    assert len(result.answer) == 160
-    assert result.answer.endswith("……")
+    assert result.answer == long_answer
     assert state.snapshot.answer == result.answer
     assert controller._messages[-1] == {
         "role": "assistant",
-        "content": result.answer,
+        "content": long_answer,
     }
-    speech.synthesize.assert_awaited_once_with(result.answer)
+    speech.synthesize.assert_awaited_once_with(long_answer)
 
 
 @pytest.mark.asyncio

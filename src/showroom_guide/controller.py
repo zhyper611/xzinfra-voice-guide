@@ -38,8 +38,6 @@ class UnlimitedGate:
 
 
 class GuideController:
-    _MAX_ANSWER_CHARS = 160
-    _TRUNCATION_MARK = "……"
     _UNANCHORED_REFERENCES = (
         "这个",
         "那个",
@@ -119,7 +117,7 @@ class GuideController:
             cached_entry = self._faq_cache.match(question)
             if cached_entry is not None:
                 await self._state.set_message("正在准备讲解内容")
-                answer = self._bound_answer(cached_entry.answer)
+                answer = cached_entry.answer
                 await self._state.set_answer(answer)
                 self._remember_exchange(question, answer)
                 prepared_audio = (
@@ -177,17 +175,6 @@ class GuideController:
                         async for event in stream:
                             if timing is not None and event.text.strip():
                                 timing.receive_xzkb_text()
-                            combined = self._state.snapshot.answer + event.text
-                            if len(combined) > self._MAX_ANSWER_CHARS:
-                                content_limit = self._MAX_ANSWER_CHARS - len(
-                                    self._TRUNCATION_MARK
-                                )
-                                bounded = (
-                                    combined[:content_limit].rstrip()
-                                    + self._TRUNCATION_MARK
-                                )
-                                await self._state.set_answer(bounded)
-                                break
                             await self._state.append_answer(event.text)
                     if self._state.snapshot.answer.strip():
                         break
@@ -227,13 +214,6 @@ class GuideController:
             ]
         )
         self._messages = self._messages[-20:]
-
-    @classmethod
-    def _bound_answer(cls, answer: str) -> str:
-        if len(answer) <= cls._MAX_ANSWER_CHARS:
-            return answer
-        content_limit = cls._MAX_ANSWER_CHARS - len(cls._TRUNCATION_MARK)
-        return answer[:content_limit].rstrip() + cls._TRUNCATION_MARK
 
     def _needs_exhibit_clarification(self, question: str) -> bool:
         return not self._messages and any(
