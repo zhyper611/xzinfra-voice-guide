@@ -12,6 +12,8 @@
 - 本地录音、上传、处理和播放使用同一套设备互斥流程
 - 设备接口使用独立密钥鉴权
 - XZKB 与 TTS 并发门控和排队超时
+- XZKB 整轮生成总超时和后台知识同步自动恢复
+- `/healthz` 存活检查与 `/readyz` 本地依赖就绪检查
 - 高频问答精确匹配与主题词、意图词规则匹配
 - 高频回答命中后跳过知识库，预生成语音有效时同时跳过在线 TTS
 - 独立的高频问答文本、语音生成、试听和审批维护页
@@ -83,6 +85,7 @@ chmod 600 .env
 | `GUIDE_FAQ_PREPARED_AUDIO_ENABLED` | 是否加载已审批的预生成语音，默认开启 |
 | `GUIDE_FAQ_ADMIN_ENABLED` | 是否启用 `/faq-cache` 维护接口，默认关闭 |
 | `GUIDE_FAQ_ADMIN_API_KEY` | 高频问答维护页独立管理密钥 |
+| `GUIDE_FAQ_PENDING_AUDIO_DIR` | 待审批语音草稿目录，默认位于用户状态目录，不纳入 Git |
 | `GUIDE_DEVICE_API_KEY` | 设备专用接口密钥，建议使用高熵随机值 |
 | `GUIDE_KNOWLEDGE_CAPTURE_ENABLED` | 是否启用知识补充；启用后必须配置下列 XZKB 专用账号和知识库 ID |
 | `GUIDE_XZKB_USERNAME` | 拥有目标知识库写入权限的 XZKB 专用本地账号 |
@@ -93,6 +96,7 @@ chmod 600 .env
 | `GUIDE_PLAYBACK_DEVICE` | PipeWire 输出目标；`default` 使用系统默认扬声器 |
 | `GUIDE_LOCAL_RECORDING_MAX_SECONDS` | 本地单次录音最长时间，默认 60 秒 |
 | `GUIDE_LOCAL_RECORDING_MIN_SECONDS` | 可提交的最短录音时间，默认 0.5 秒 |
+| `GUIDE_XZKB_TOTAL_TIMEOUT_SECONDS` | 单轮 XZKB 完整生成和兼容重试的总时限，默认 120 秒 |
 
 其他可调项及默认值见 [.env.example](.env.example)。不要把真实 `.env`、API Key 或设备密钥提交到 Git。
 
@@ -121,6 +125,8 @@ set +a
 - `/`：多人网页问答页
 - `/device-test`：设备语音 HTTP 测试页
 - `/faq-cache`：高频问答文本与语音维护页；需要单独启用并配置管理密钥
+- `/healthz`：进程存活检查，不访问上游服务
+- `/readyz`：会话清理、知识同步和本地 Outbox 就绪检查；异常时返回 `503`
 - `/docs`：FastAPI 接口文档
 
 ## 设备接口

@@ -14,6 +14,7 @@ from showroom_guide.knowledge_capture import (
     KnowledgeAsrUnavailable,
     KnowledgeTtsUnavailable,
 )
+from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.knowledge_mode import (
     KnowledgeLongPressResult,
     KnowledgeModeInvalidState,
@@ -191,7 +192,7 @@ def make_controller_with_buttons(
     controller = KnowledgeWebController(
         buttons,
         knowledge,
-        outbox,
+        AsyncKnowledgeOutbox(outbox) if outbox is not None else None,
         lease_seconds=lease_seconds,
         clock=clock,
         sleep=sleep,

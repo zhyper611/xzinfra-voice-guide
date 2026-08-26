@@ -24,9 +24,7 @@ benchmark-fixtures/
 benchmark-results/
 !config/prepared_audio/
 !config/prepared_audio/*.wav
-!config/prepared_audio/.pending/
-!config/prepared_audio/.pending/*.wav
-!config/prepared_audio/.pending/*.json
+config/prepared_audio/.pending/
 !src/showroom_guide/assets/*.wav
 
 # Local development artifacts

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from showroom_guide.audio_store import AudioNotFound, AudioStore
+from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.button_workflow import DeviceButtonWorkflow
 from showroom_guide.clients.speech import SpeechClient
 from showroom_guide.clients.xzkb import XzkbClient
@@ -105,6 +107,7 @@ LOCAL_PROMPT_PATHS = {
     "knowledge-saved": Path(__file__).parent / "assets" / "knowledge-saved.wav",
 }
 SESSION_COOKIE = "showroom_session"
+logger = logging.getLogger(__name__)
 
 
 class QuestionRequest(BaseModel):
@@ -185,7 +188,7 @@ class Runtime:
     xzkb: XzkbClient
     speech: SpeechClient
     cleanup_seconds: float
-    knowledge_outbox: KnowledgeOutbox | None
+    knowledge_outbox: AsyncKnowledgeOutbox | None
     knowledge_web: KnowledgeWebController
     faq_cache: FaqCache | None = None
     prepared_audio: PreparedAudioStore | None = None
@@ -195,6 +198,7 @@ class Runtime:
     knowledge_sync: KnowledgeSyncService | None = None
     button_workflow: DeviceButtonWorkflow | None = None
     gpio_button: GpioButtonService | None = None
+    cleanup_task: asyncio.Task[None] | None = None
 
     async def aclose(self) -> None:
         errors: list[BaseException] = []
@@ -239,6 +243,8 @@ class Runtime:
         await attempt(self.local_device.aclose())
         if self.knowledge_sync is not None:
             await attempt(self.knowledge_sync.aclose())
+        if self.knowledge_outbox is not None:
+            await attempt(self.knowledge_outbox.aclose())
         await attempt(self.xzkb.aclose())
         await attempt(self.speech.aclose())
         if errors:
@@ -297,7 +303,13 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         configured.tts_timeout_seconds,
     )
     faq_admin_service = (
-        FaqCacheReadService(configured.faq_cache_file, tts_profile, speech)
+        FaqCacheReadService(
+            configured.faq_cache_file,
+            tts_profile,
+            speech,
+            pending_dir=configured.faq_pending_audio_dir,
+            migrate_legacy_pending=True,
+        )
         if configured.faq_admin_enabled
         else None
     )
@@ -323,6 +335,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             faq_cache=faq_cache,
             prepared_audio=prepared_audio,
             playback_timeout_seconds=configured.playback_timeout_seconds,
+            xzkb_total_timeout_seconds=configured.xzkb_total_timeout_seconds,
         )
 
     sessions = SessionManager(
@@ -365,7 +378,9 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
     knowledge_sync = None
     if knowledge_credentials is not None:
         username, password, kb_id = knowledge_credentials
-        knowledge_outbox = KnowledgeOutbox(configured.knowledge_outbox_path)
+        knowledge_outbox = AsyncKnowledgeOutbox(
+            KnowledgeOutbox(configured.knowledge_outbox_path)
+        )
         knowledge_auth = XzkbLocalAccountAuth(
             configured.xzkb_base_url,
             username,
@@ -450,15 +465,27 @@ def set_session_cookie(response: Response, session_id: str) -> None:
 
 
 async def cleanup_sessions(runtime: Runtime) -> None:
+    retry_seconds = runtime.cleanup_seconds
     while True:
-        await asyncio.sleep(runtime.cleanup_seconds)
-        await runtime.sessions.prune()
+        await asyncio.sleep(retry_seconds)
+        try:
+            await runtime.sessions.prune()
+            retry_seconds = runtime.cleanup_seconds
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("session_cleanup_cycle_failed")
+            retry_seconds = min(
+                retry_seconds * 2,
+                runtime.cleanup_seconds * 8,
+            )
 
 
 def create_app(runtime: Runtime) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         cleanup_task = asyncio.create_task(cleanup_sessions(runtime))
+        runtime.cleanup_task = cleanup_task
         knowledge_sync = getattr(runtime, "knowledge_sync", None)
         gpio_button = getattr(runtime, "gpio_button", None)
         if knowledge_sync is not None:
@@ -471,6 +498,7 @@ def create_app(runtime: Runtime) -> FastAPI:
             cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await cleanup_task
+            runtime.cleanup_task = None
             await runtime.aclose()
 
     app = FastAPI(title="展厅 AI 讲解", lifespan=lifespan)
@@ -505,6 +533,38 @@ def create_app(runtime: Runtime) -> FastAPI:
     @app.get("/healthz", include_in_schema=False)
     async def healthcheck() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readiness() -> JSONResponse:
+        cleanup_task = getattr(runtime, "cleanup_task", None)
+        checks = {
+            "session_cleanup": (
+                "ok"
+                if cleanup_task is not None and not cleanup_task.done()
+                else "failed"
+            ),
+            "knowledge_sync": "disabled",
+            "knowledge_outbox": "disabled",
+        }
+        knowledge_sync = getattr(runtime, "knowledge_sync", None)
+        if knowledge_sync is not None:
+            checks["knowledge_sync"] = (
+                "ok" if knowledge_sync.is_running else "failed"
+            )
+        knowledge_outbox = getattr(runtime, "knowledge_outbox", None)
+        if knowledge_outbox is not None:
+            try:
+                await knowledge_outbox.ping()
+            except Exception:
+                checks["knowledge_outbox"] = "failed"
+            else:
+                checks["knowledge_outbox"] = "ok"
+        ready = all(value != "failed" for value in checks.values())
+        return JSONResponse(
+            {"status": "ready" if ready else "not_ready", "checks": checks},
+            status_code=200 if ready else 503,
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def establish_http_session(
         request: Request,

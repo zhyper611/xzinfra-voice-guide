@@ -47,7 +47,7 @@ class StatefulCapture:
     def accept(self, draft):
         self._draft = draft
 
-    def save(self):
+    async def save(self):
         self.save_calls += 1
         self._draft = None
         return self.saved_entry

@@ -62,7 +62,7 @@ class GuideStateStore:
         return self._snapshot
 
     def subscribe(self) -> asyncio.Queue[GuideSnapshot]:
-        queue: asyncio.Queue[GuideSnapshot] = asyncio.Queue()
+        queue: asyncio.Queue[GuideSnapshot] = asyncio.Queue(maxsize=1)
         self._subscribers.add(queue)
         return queue
 
@@ -119,7 +119,7 @@ class GuideStateStore:
         async with self._lock:
             self._snapshot = GuideSnapshot()
             for queue in tuple(self._subscribers):
-                queue.put_nowait(self._snapshot)
+                self._publish(queue, self._snapshot)
             return self._snapshot
 
     async def _update(self, **changes: object) -> GuideSnapshot:
@@ -129,5 +129,14 @@ class GuideStateStore:
     def _update_locked(self, **changes: object) -> GuideSnapshot:
         self._snapshot = self._snapshot.model_copy(update=changes)
         for queue in tuple(self._subscribers):
-            queue.put_nowait(self._snapshot)
+            self._publish(queue, self._snapshot)
         return self._snapshot
+
+    @staticmethod
+    def _publish(
+        queue: asyncio.Queue[GuideSnapshot],
+        snapshot: GuideSnapshot,
+    ) -> None:
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(snapshot)

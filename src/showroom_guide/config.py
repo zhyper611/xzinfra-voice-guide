@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     faq_prepared_audio_enabled: bool = True
     faq_admin_enabled: bool = False
     faq_admin_api_key: SecretStr | None = None
+    faq_pending_audio_dir: Path = (
+        Path.home()
+        / ".local"
+        / "share"
+        / "showroom-guide"
+        / "prepared-audio"
+        / "pending"
+    )
     asr_base_url: str = Field(min_length=1)
     asr_api_key: SecretStr = Field(min_length=8)
     asr_model: str = Field(min_length=1)
@@ -36,6 +44,7 @@ class Settings(BaseSettings):
     tts_voice: str = "alloy"
     tts_speed: float = Field(default=1.0, ge=0.25, le=4.0)
     request_timeout_seconds: float = Field(default=30.0, gt=0)
+    xzkb_total_timeout_seconds: float = Field(default=120.0, gt=0)
     asr_timeout_seconds: float = Field(default=8.0, gt=0)
     tts_timeout_seconds: float = Field(default=12.0, gt=0)
     first_audio_timeout_seconds: float = Field(default=5.0, gt=0)
@@ -98,9 +107,13 @@ class Settings(BaseSettings):
             raise ValueError("XZKB 专用账号用户名不能为空")
         return normalized
 
-    @field_validator("knowledge_outbox_path", mode="before")
+    @field_validator(
+        "knowledge_outbox_path",
+        "faq_pending_audio_dir",
+        mode="before",
+    )
     @classmethod
-    def expand_knowledge_outbox_path(cls, value: str | Path) -> Path:
+    def expand_user_path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
 
     @model_validator(mode="before")

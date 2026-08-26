@@ -127,7 +127,7 @@ class KnowledgeModeWorkflow:
                 self._state is KnowledgeModeState.CONFIRMING
                 and self._capture.has_draft
             ):
-                entry = self._capture.save()
+                entry = await self._capture.save()
                 self._state = KnowledgeModeState.INACTIVE
                 await self._play_named_prompt_safely("knowledge-saved")
                 return KnowledgeLongPressResult(exited=True, saved_entry=entry)

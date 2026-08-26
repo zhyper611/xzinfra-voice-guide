@@ -109,8 +109,9 @@ async def test_synthesize_review_wraps_tts_transport_and_response_errors(error):
     assert caught.value.__cause__ is error
 
 
-def test_save_persists_locally_before_waking_background_sync():
-    outbox = MagicMock()
+@pytest.mark.asyncio
+async def test_save_persists_locally_before_waking_background_sync():
+    outbox = AsyncMock()
     outbox.enqueue.return_value = MagicMock(id="entry-id")
     sync = MagicMock()
     session = KnowledgeCaptureSession(AsyncMock(), outbox, sync)
@@ -118,10 +119,26 @@ def test_save_persists_locally_before_waking_background_sync():
 
     assert session.draft_audio == b"wav"
 
-    entry = session.save()
+    entry = await session.save()
 
-    outbox.enqueue.assert_called_once_with("确认后的知识。")
+    outbox.enqueue.assert_awaited_once_with("确认后的知识。")
     sync.wake.assert_called_once_with()
     assert entry.id == "entry-id"
     assert session.has_draft is False
     assert session.draft_audio is None
+
+
+@pytest.mark.asyncio
+async def test_save_failure_preserves_draft_and_does_not_wake_sync():
+    outbox = AsyncMock()
+    outbox.enqueue.side_effect = OSError("disk unavailable")
+    sync = MagicMock()
+    session = KnowledgeCaptureSession(AsyncMock(), outbox, sync)
+    session.accept(KnowledgeDraft(text="确认后的知识。", audio=b"wav"))
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        await session.save()
+
+    assert session.draft_text == "确认后的知识。"
+    assert session.draft_audio == b"wav"
+    sync.wake.assert_not_called()

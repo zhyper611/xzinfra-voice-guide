@@ -67,7 +67,7 @@ class FakeKnowledgeCapture:
         self.accepted_drafts.append(draft)
         self._draft = draft
 
-    def save(self):
+    async def save(self):
         if self.save_error is not None:
             raise self.save_error
         if self._draft is None:

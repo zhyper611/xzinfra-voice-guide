@@ -76,10 +76,10 @@ class KnowledgeCaptureSession:
     def accept(self, draft: KnowledgeDraft) -> None:
         self._draft = draft
 
-    def save(self):
+    async def save(self):
         if self._draft is None:
             raise ValueError("当前没有可保存的知识草稿")
-        entry = self._outbox.enqueue(self._draft.text)
+        entry = await self._outbox.enqueue(self._draft.text)
         self._draft = None
         self._sync_service.wake()
         return entry

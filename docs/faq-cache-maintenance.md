@@ -63,7 +63,9 @@
 
 工具先把 TTS 结果写入目标目录中的临时文件，并读取声明的全部 PCM 帧校验实际字节数，再提交 WAV 和 manifest。覆盖前会保留同目录备份；两者都成功后才删除备份，提交失败会回滚 WAV 和 manifest。manifest 同时记录完整 WAV 的 `wav_sha256`，内容变化会被标记为 stale。单条失败不会覆盖已有有效 WAV，会继续处理后续条目并以非零状态结束。
 
-临时录音和普通测试音频不能提交到仓库。管理页面生成的待审批 WAV 与配套 JSON 可以提交，便于两人共同试听和调试；试听通过的正式预生成 WAV 和对应 `manifest.json` 也应一起提交，确保树莓派拉取代码后可以直接加载。`.gitignore` 默认忽略其他 WAV，只放行 `config/prepared_audio/*.wav` 和 `config/prepared_audio/.pending/` 下的受管草稿。
+临时录音、普通测试音频和管理页面生成的待审批草稿不能提交到仓库。待审批 WAV 与配套 JSON 默认保存在 `~/.local/share/showroom-guide/prepared-audio/pending/`，可通过 `GUIDE_FAQ_PENDING_AUDIO_DIR` 调整。试听通过的正式预生成 WAV 和对应 `manifest.json` 应一起提交，确保树莓派拉取代码后可以直接加载。`.gitignore` 只放行 `config/prepared_audio/*.wav` 下的正式音频。
+
+服务启动时会保守迁移旧版 `config/prepared_audio/.pending/` 草稿：只有元数据、WAV 和哈希全部有效且目标不存在时才复制，旧源文件不会自动删除。单条损坏草稿会被跳过，目标目录不可写时继续使用旧目录，避免维护功能因迁移失败不可用。
 
 运行时默认启用 `GUIDE_FAQ_PREPARED_AUDIO_ENABLED=true`。启动时只加载同时通过 manifest、答案/version/TTS profile、WAV 元数据和完整文件哈希校验的条目；缺失、损坏或 stale 的单条音频只记录 warning，并回退在线 TTS。设置为 `false` 或关闭 FAQ 缓存时不会读取 manifest 或 WAV。预生成命中会复用现有会话 AudioStore 和受保护音频 URL，并跳过知识库、TTS gate 和在线 TTS。
 
@@ -105,7 +107,7 @@
 单条语音维护流程：
 
 1. 选择条目并点击“生成语音草稿”，后端使用 YAML 中的完整 `answer` 调用当前 TTS。
-2. 生成结果写入 `config/prepared_audio/.pending/`，不会覆盖正式 WAV，也不会被运行时加载；需要协作试听时，WAV 和同名条目的 JSON 元数据必须一起提交。
+2. 生成结果写入 `GUIDE_FAQ_PENDING_AUDIO_DIR`，不会覆盖正式 WAV，也不会被运行时加载或提交到 Git。
 3. 完整播放待审批草稿后，页面才启用“审批通过并安装”。
 4. 审批时再次校验条目 version、answer、TTS profile、WAV 元数据和哈希。
 5. 校验通过后，使用现有事务逻辑写入条目的 `audio_file` 和正式 manifest；失败时保留原正式文件。

@@ -1,10 +1,12 @@
 import asyncio
 import io
+import threading
 import wave
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from showroom_guide import local_device as local_device_module
 from showroom_guide.controller import GuideServiceUnavailable, QuestionInProgress
 from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
@@ -139,6 +141,27 @@ async def test_start_stop_processes_and_plays_in_order():
     assert events.index("play") < events.index("finished")
     session.get_audio.assert_called_once_with("audio-id")
     assert not workflow.is_recording
+
+
+@pytest.mark.asyncio
+async def test_recording_inspection_runs_off_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    inspection_thread = None
+    original = local_device_module.inspect_wav
+
+    def inspect(source):
+        nonlocal inspection_thread
+        inspection_thread = threading.get_ident()
+        return original(source)
+
+    monkeypatch.setattr(local_device_module, "inspect_wav", inspect)
+    workflow = LocalDeviceWorkflow(session=FakeSession(), audio=FakeAudio())
+
+    await workflow.start_recording()
+    await workflow.stop_recording()
+
+    assert inspection_thread is not None
+    assert inspection_thread != event_loop_thread
 
 
 def test_idle_property_tracks_device_ownership():
@@ -473,6 +496,7 @@ async def test_replay_requires_recording_and_idle_device():
     await workflow.start_recording()
     with pytest.raises(QuestionInProgress):
         await workflow.replay_last_recording()
+    await workflow.reset()
 
 
 @pytest.mark.asyncio

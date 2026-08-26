@@ -27,6 +27,7 @@ def make_controller(
     faq_cache=None,
     prepared_audio=None,
     playback_timeout_seconds=300,
+    xzkb_total_timeout_seconds=120,
 ):
     state = GuideStateStore()
     xzkb = MagicMock()
@@ -40,8 +41,14 @@ def make_controller(
         faq_cache=faq_cache,
         prepared_audio=prepared_audio,
         playback_timeout_seconds=playback_timeout_seconds,
+        xzkb_total_timeout_seconds=xzkb_total_timeout_seconds,
     )
     return controller, state, xzkb, speech
+
+
+async def endless_events():
+    yield ChatStreamEvent(text="未完成")
+    await asyncio.Event().wait()
 
 
 @pytest.mark.asyncio
@@ -59,6 +66,22 @@ async def test_text_question_streams_answer_and_returns_wav():
     assert result.answer == "第一段。第二段。"
     assert result.audio == wav
     speech.synthesize.assert_awaited_once_with("第一段。第二段。")
+
+
+@pytest.mark.asyncio
+async def test_xzkb_total_timeout_does_not_remember_partial_answer():
+    controller, state, xzkb, speech = make_controller(
+        xzkb_total_timeout_seconds=0.01,
+    )
+    xzkb.stream_chat.return_value = endless_events()
+
+    with pytest.raises(GuideServiceUnavailable):
+        await controller.ask_text("介绍展项")
+
+    assert state.snapshot.phase is GuidePhase.DEGRADED
+    assert state.snapshot.message == "知识库响应超时，请稍后重试"
+    assert controller._messages == []
+    speech.synthesize.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -128,6 +128,10 @@ def base_settings(**overrides: object) -> Settings:
         "faq_admin_api_key": ADMIN_KEY,
     }
     values.update(overrides)
+    if "faq_pending_audio_dir" not in overrides and "faq_cache_file" in overrides:
+        values["faq_pending_audio_dir"] = (
+            Path(overrides["faq_cache_file"]).parent / ".test-pending"
+        )
     return Settings(**values)
 
 
@@ -199,6 +203,109 @@ async def test_snapshot_reports_all_audio_states_and_safe_fields(tmp_path: Path)
         "disabled",
     ]
     assert str(tmp_path) not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_legacy_draft_is_copied_and_source_is_preserved(tmp_path: Path):
+    entry_data = cache_entry("overview")
+    config_path = write_cache(tmp_path, [entry_data])
+    entry = load_cache(config_path).entries[0]
+    legacy_service = FaqCacheReadService(config_path, PROFILE)
+    legacy_service._store_draft(entry, make_wav(frames=320))
+    legacy_metadata = config_path.parent / "prepared_audio" / ".pending" / "overview.json"
+    legacy_wav_name = json.loads(legacy_metadata.read_text(encoding="utf-8"))[
+        "wav_file"
+    ]
+    legacy_wav = legacy_metadata.parent / legacy_wav_name
+    target_dir = tmp_path / "state" / "pending"
+
+    migrated = FaqCacheReadService(
+        config_path,
+        PROFILE,
+        pending_dir=target_dir,
+        migrate_legacy_pending=True,
+    )
+
+    assert migrated.snapshot().entries[0].draft_audio.status == "ready"
+    assert legacy_metadata.is_file()
+    assert legacy_wav.is_file()
+    assert (target_dir / "overview.json").is_file()
+    assert (target_dir / legacy_wav_name).is_file()
+
+
+def test_legacy_migration_does_not_overwrite_existing_target(tmp_path: Path):
+    config_path = write_cache(tmp_path, [cache_entry("overview")])
+    entry = load_cache(config_path).entries[0]
+    FaqCacheReadService(config_path, PROFILE)._store_draft(
+        entry,
+        make_wav(sample=b"\x01\x00", frames=320),
+    )
+    target_dir = tmp_path / "state" / "pending"
+    target_service = FaqCacheReadService(
+        config_path,
+        PROFILE,
+        pending_dir=target_dir,
+    )
+    target_service._store_draft(
+        entry,
+        make_wav(sample=b"\x02\x00", frames=320),
+    )
+    metadata_before = (target_dir / "overview.json").read_bytes()
+
+    migrated = FaqCacheReadService(
+        config_path,
+        PROFILE,
+        pending_dir=target_dir,
+        migrate_legacy_pending=True,
+    )
+
+    assert (target_dir / "overview.json").read_bytes() == metadata_before
+    assert migrated.snapshot().entries[0].draft_audio.status == "ready"
+
+
+def test_invalid_legacy_draft_does_not_block_service_start(tmp_path: Path):
+    config_path = write_cache(tmp_path, [cache_entry("overview")])
+    entry = load_cache(config_path).entries[0]
+    legacy_service = FaqCacheReadService(config_path, PROFILE)
+    legacy_service._store_draft(entry, make_wav(frames=320))
+    metadata_path = (
+        config_path.parent / "prepared_audio" / ".pending" / "overview.json"
+    )
+    wav_name = json.loads(metadata_path.read_text(encoding="utf-8"))["wav_file"]
+    (metadata_path.parent / wav_name).write_bytes(b"not-a-wav")
+
+    service = FaqCacheReadService(
+        config_path,
+        PROFILE,
+        pending_dir=tmp_path / "state" / "pending",
+        migrate_legacy_pending=True,
+    )
+
+    assert service.snapshot().entries[0].draft_audio.status == "none"
+    assert metadata_path.is_file()
+
+
+def test_copy_failure_falls_back_to_legacy_draft(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = write_cache(tmp_path, [cache_entry("overview")])
+    entry = load_cache(config_path).entries[0]
+    legacy_service = FaqCacheReadService(config_path, PROFILE)
+    legacy_service._store_draft(entry, make_wav(frames=320))
+
+    def fail_copy(_path, _content):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr("showroom_guide.faq_admin._atomic_write_bytes", fail_copy)
+    service = FaqCacheReadService(
+        config_path,
+        PROFILE,
+        pending_dir=tmp_path / "state" / "pending",
+        migrate_legacy_pending=True,
+    )
+
+    assert service.snapshot().entries[0].draft_audio.status == "ready"
+    assert service._pending_dir == service._legacy_pending_dir
 
 
 def test_single_invalid_path_does_not_block_other_entries(tmp_path: Path):
@@ -578,6 +685,9 @@ async def test_admin_is_independent_from_runtime_faq_matching(tmp_path: Path):
     try:
         assert runtime.faq_cache is None
         assert runtime.faq_admin_service is not None
+        assert runtime.faq_admin_service._pending_dir == (
+            config_path.parent / ".test-pending"
+        ).resolve()
         snapshot = runtime.faq_admin_service.snapshot()
         assert snapshot.entries[0].id == "one"
     finally:

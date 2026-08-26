@@ -23,7 +23,7 @@ class GpioButtonService:
         self._workflow = workflow
         self._button_factory = button_factory
         self._button = None
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         self._worker: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._held = False
@@ -76,7 +76,13 @@ class GpioButtonService:
 
     def _dispatch(self, event: str) -> None:
         if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
+            self._loop.call_soon_threadsafe(self._enqueue, event)
+
+    def _enqueue(self, event: str) -> None:
+        if self._queue.full():
+            logger.debug("gpio_button_event_dropped", extra={"event": event})
+            return
+        self._queue.put_nowait(event)
 
     async def _run(self) -> None:
         while True:

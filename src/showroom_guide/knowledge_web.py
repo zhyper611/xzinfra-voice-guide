@@ -313,7 +313,7 @@ class KnowledgeWebController:
                 404,
             )
         try:
-            entry = self._outbox.get(entry_id)
+            entry = await self._outbox.get(entry_id)
         except sqlite3.Error as error:
             raise self._mapped_error(error) from error
         if entry is None:

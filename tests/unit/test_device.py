@@ -67,8 +67,29 @@ class TrackingSpeech:
         return make_wav()
 
 
-def make_session(speech=None):
-    state = GuideStateStore()
+class TrackingStateStore(GuideStateStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.phases: list[GuidePhase] = []
+
+    async def start_recording(self):
+        snapshot = await super().start_recording()
+        self.phases.append(snapshot.phase)
+        return snapshot
+
+    async def start_text_question(self, transcript):
+        snapshot = await super().start_text_question(transcript)
+        self.phases.append(snapshot.phase)
+        return snapshot
+
+    async def transition(self, phase):
+        snapshot = await super().transition(phase)
+        self.phases.append(snapshot.phase)
+        return snapshot
+
+
+def make_session(speech=None, state=None):
+    state = state or GuideStateStore()
     xzkb = TrackingXzkb()
     speech = speech or TrackingSpeech()
     controller = GuideController(state, xzkb, speech)
@@ -127,20 +148,13 @@ def test_validate_wav_rejects_compressed_format():
 
 @pytest.mark.asyncio
 async def test_process_wav_runs_full_pipeline_and_stores_audio():
-    session, state, _, speech = make_session()
-    queue = state.subscribe()
+    state = TrackingStateStore()
+    session, _, _, speech = make_session(state=state)
     source = make_wav()
 
     result = await session.process_wav(source)
 
-    events = []
-    while not queue.empty():
-        events.append((await queue.get()).phase)
-    ordered_phases = []
-    for phase in events:
-        if not ordered_phases or ordered_phases[-1] is not phase:
-            ordered_phases.append(phase)
-    assert ordered_phases == [
+    assert state.phases == [
         GuidePhase.RECORDING,
         GuidePhase.TRANSCRIBING,
         GuidePhase.THINKING,
@@ -154,18 +168,15 @@ async def test_process_wav_runs_full_pipeline_and_stores_audio():
 
 @pytest.mark.asyncio
 async def test_process_recorded_wav_does_not_repeat_recording_phase():
-    session, state, _, _ = make_session()
-    queue = state.subscribe()
+    state = TrackingStateStore()
+    session, _, _, _ = make_session(state=state)
     await session.begin_recording()
-    await queue.get()
+    state.phases.clear()
 
     await session.process_recorded_wav(make_wav())
 
-    phases = []
-    while not queue.empty():
-        phases.append((await queue.get()).phase)
-    assert phases[0] is GuidePhase.TRANSCRIBING
-    assert GuidePhase.RECORDING not in phases
+    assert state.phases[0] is GuidePhase.TRANSCRIBING
+    assert GuidePhase.RECORDING not in state.phases
 
 
 @pytest.mark.asyncio

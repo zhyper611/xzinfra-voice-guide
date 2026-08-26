@@ -36,6 +36,19 @@ async def test_updates_are_published_to_subscribers():
 
 
 @pytest.mark.asyncio
+async def test_slow_subscriber_keeps_only_latest_snapshot():
+    store = GuideStateStore()
+    queue = store.subscribe()
+
+    await store.set_message("第一步")
+    await store.set_message("第二步")
+    await store.set_message("最终状态")
+
+    assert queue.qsize() == 1
+    assert (await queue.get()).message == "最终状态"
+
+
+@pytest.mark.asyncio
 async def test_unsubscribe_stops_future_updates():
     store = GuideStateStore()
     queue = store.subscribe()

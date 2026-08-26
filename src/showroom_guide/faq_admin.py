@@ -23,6 +23,7 @@ from showroom_guide.faq_audio import (
     AudioConfigError,
     FaqAudioGenerator,
     TtsProfile,
+    WavValidationError,
     assess_entry_content,
     load_manifest,
     resolve_audio_paths,
@@ -201,12 +202,29 @@ class FaqCacheReadService:
         config_path: str | Path,
         profile: TtsProfile,
         synthesizer: Any | None = None,
+        *,
+        pending_dir: str | Path | None = None,
+        migrate_legacy_pending: bool = False,
     ) -> None:
         self._config_path = Path(config_path)
         self._profile = profile
         self._synthesizer = synthesizer
+        self._legacy_pending_dir = resolve_manifest_path(
+            self._config_path,
+            "prepared_audio/.pending/.draft-path-check",
+        ).parent
+        self._pending_dir = (
+            Path(pending_dir).expanduser().resolve()
+            if pending_dir is not None
+            else self._legacy_pending_dir
+        )
         self._operation_lock = asyncio.Lock()
         self._file_lock = threading.Lock()
+        if (
+            migrate_legacy_pending
+            and self._pending_dir != self._legacy_pending_dir
+        ):
+            self._migrate_legacy_pending()
 
     def snapshot(self) -> FaqCacheSnapshot:
         cache = self._load_cache()
@@ -576,10 +594,75 @@ class FaqCacheReadService:
             raise FaqAdminUnavailable from error
 
     def _pending_path(self, filename: str) -> Path:
-        return resolve_manifest_path(
-            self._config_path,
-            f"prepared_audio/.pending/{filename}",
+        return self._pending_path_in(self._pending_dir, filename)
+
+    @staticmethod
+    def _pending_path_in(directory: Path, filename: str) -> Path:
+        windows_name = PureWindowsPath(filename)
+        if (
+            not filename
+            or filename != Path(filename).name
+            or filename != windows_name.name
+            or windows_name.drive
+        ):
+            raise AudioConfigError("草稿文件名无效")
+        return directory / filename
+
+    def _legacy_pending_path(self, filename: str) -> Path:
+        return self._pending_path_in(self._legacy_pending_dir, filename)
+
+    def _migrate_legacy_pending(self) -> None:
+        try:
+            cache = self._load_cache()
+        except (FaqAdminConfigError, FaqAdminUnavailable):
+            logger.exception("FAQ admin legacy draft migration skipped")
+            return
+        try:
+            for entry in cache.entries:
+                self._migrate_legacy_entry(entry)
+        except (AudioConfigError, OSError, UnicodeError, json.JSONDecodeError):
+            logger.exception("FAQ admin legacy draft migration failed")
+            self._pending_dir = self._legacy_pending_dir
+
+    def _migrate_legacy_entry(self, entry: CacheEntry) -> None:
+        target_metadata = self._draft_metadata_path(entry)
+        if target_metadata.exists():
+            return
+        source_metadata = self._legacy_pending_path(f"{entry.id}.json")
+        status, metadata_content = _read_regular_content(
+            source_metadata,
+            MAX_DRAFT_METADATA_BYTES,
         )
+        if status is not None or metadata_content is None:
+            return
+        try:
+            payload = json.loads(metadata_content.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        wav_name = payload.get("wav_file")
+        if not isinstance(wav_name, str):
+            return
+        source_wav = self._legacy_pending_path(wav_name)
+        target_wav = self._pending_path(wav_name)
+        if target_wav.exists():
+            raise OSError("目标草稿 WAV 已存在")
+        wav_status, wav_content = _read_audio_content(source_wav)
+        if wav_status is not None or wav_content is None:
+            return
+        try:
+            validate_wav(wav_content)
+        except WavValidationError:
+            return
+        if payload.get("wav_sha256") != hashlib.sha256(wav_content).hexdigest():
+            return
+        _atomic_write_bytes(target_wav, wav_content)
+        try:
+            _atomic_write_json(target_metadata, payload)
+        except BaseException:
+            target_wav.unlink(missing_ok=True)
+            raise
 
     def _draft_metadata_path(self, entry: CacheEntry) -> Path:
         return self._pending_path(f"{entry.id}.json")

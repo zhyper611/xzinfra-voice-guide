@@ -1,3 +1,4 @@
+import asyncio
 import re
 from functools import partial
 from types import FrameType, TracebackType
@@ -18,6 +19,36 @@ from showroom_guide.knowledge_sync import (
     KnowledgeSyncService,
     _safe_sync_error_stack,
 )
+from showroom_guide.async_outbox import AsyncKnowledgeOutbox
+
+
+@pytest.mark.asyncio
+async def test_sync_once_awaits_outbox_reads():
+    outbox = AsyncMock()
+    outbox.list_due.return_value = []
+    service = KnowledgeSyncService(outbox, AsyncMock(), poll_seconds=10)
+
+    await service.sync_once()
+
+    outbox.list_due.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_sync_worker_continues_after_unexpected_cycle_failure():
+    outbox = AsyncMock()
+    outbox.list_due.side_effect = [OSError("disk busy"), []]
+    client = AsyncMock()
+    service = KnowledgeSyncService(outbox, client, poll_seconds=0.01)
+    service.start()
+
+    for _ in range(50):
+        if outbox.list_due.await_count >= 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert outbox.list_due.await_count >= 2
+    assert service.is_running is True
+    await service.aclose()
 
 
 class Clock:
@@ -42,7 +73,9 @@ async def test_pending_entry_uploads_then_waits_for_processing(tmp_path):
     entry = outbox.enqueue("知识正文")
     client = AsyncMock()
     client.document_state.return_value = DocumentProcessingState.NOT_FOUND
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -65,7 +98,9 @@ async def test_uploaded_entry_is_marked_synced_and_prunes_old_history(tmp_path):
     outbox.mark_uploaded(entry.id, retry_after_seconds=0)
     client = AsyncMock()
     client.document_state.return_value = DocumentProcessingState.SUCCESS
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -88,7 +123,9 @@ async def test_uploading_entry_remote_success_is_marked_synced_without_reupload(
     outbox.mark_uploading(entry.id)
     client = AsyncMock()
     client.document_state.return_value = DocumentProcessingState.SUCCESS
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -122,7 +159,9 @@ async def test_prune_failure_does_not_turn_remote_success_into_sync_failure(
     monkeypatch.setattr(outbox, "prune_synced", prune_synced)
     client = AsyncMock()
     client.document_state.return_value = DocumentProcessingState.SUCCESS
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -153,7 +192,9 @@ async def test_sync_failure_keeps_entry_and_uses_exponential_backoff(tmp_path):
     client = AsyncMock()
     client.upload.side_effect = httpx.ConnectError("offline")
     client.document_state.return_value = DocumentProcessingState.NOT_FOUND
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -179,7 +220,9 @@ async def test_document_state_failure_preserves_uploaded_retry_state(tmp_path):
     outbox.mark_uploaded(entry.id, retry_after_seconds=0)
     client = AsyncMock()
     client.document_state.side_effect = httpx.ConnectError("status offline")
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -243,7 +286,9 @@ async def test_sync_failure_persists_only_safe_message(
     entry = outbox.enqueue("不可写入错误状态的业务正文")
     client = AsyncMock()
     client.upload.side_effect = error
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -286,7 +331,9 @@ async def test_sync_failure_logs_safe_immutable_stack_without_original_error(
         _raise_sync_error_with_sensitive_locals,
         original_errors,
     )
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -361,7 +408,9 @@ async def test_sync_failure_logs_none_when_error_stack_is_empty(
         "showroom_guide.knowledge_sync._safe_sync_error_stack",
         extract_after_discarding_traceback,
     )
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 
@@ -391,7 +440,9 @@ async def test_uploading_entry_already_accepted_remotely_is_not_uploaded_again(
     outbox.mark_uploading(entry.id)
     client = AsyncMock()
     client.document_state.return_value = DocumentProcessingState.PENDING
-    service = KnowledgeSyncService(outbox, client, poll_seconds=10, clock=clock)
+    service = KnowledgeSyncService(
+        AsyncKnowledgeOutbox(outbox), client, poll_seconds=10, clock=clock
+    )
 
     await service.sync_once()
 

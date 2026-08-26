@@ -44,6 +44,8 @@ class FakeRuntime:
         self.device = MagicMock()
         self.device_api_key = SecretStr("device-test-key")
         self.device_max_upload_bytes = 10 * 1024 * 1024
+        self.knowledge_sync = None
+        self.knowledge_outbox = None
         self.aclose = AsyncMock()
 
 
@@ -526,6 +528,34 @@ def test_health_endpoint_reports_process_liveness_without_session():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_ready_endpoint_reports_local_background_health():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "checks": {
+            "session_cleanup": "ok",
+            "knowledge_sync": "disabled",
+            "knowledge_outbox": "disabled",
+        },
+    }
+
+
+def test_ready_endpoint_reports_failed_outbox_without_stopping_service():
+    runtime = FakeRuntime()
+    runtime.knowledge_outbox = AsyncMock()
+    runtime.knowledge_outbox.ping.side_effect = OSError("disk unavailable")
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["knowledge_outbox"] == "failed"
+    assert client.get("/healthz").status_code == 200
 
 
 def test_styles_include_brand_tokens_and_responsive_accessibility_rules():

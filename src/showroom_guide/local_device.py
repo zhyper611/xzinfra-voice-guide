@@ -199,7 +199,7 @@ class LocalDeviceWorkflow:
                 self._audio.play_stop_cue,
                 "stop",
             )
-            metrics = inspect_wav(captured)
+            metrics = await asyncio.to_thread(inspect_wav, captured)
             self._last_recording = captured
             if metrics.duration_seconds < self._min_recording_seconds:
                 raise RecordingTooShort(

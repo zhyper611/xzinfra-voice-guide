@@ -1,15 +1,18 @@
 import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
 from showroom_guide import main as main_module
+from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.config import Settings
 from showroom_guide.knowledge_web import KnowledgeWebError
 from showroom_guide.main import Runtime, create_runtime
+from showroom_guide.main import cleanup_sessions
 
 
 def make_settings(**overrides) -> Settings:
@@ -69,7 +72,7 @@ def make_close_test_runtime(events, **probes) -> Runtime:
         xzkb=probes.get("xzkb", make_close_probe("xzkb", events)),
         speech=probes.get("speech", make_close_probe("speech", events)),
         cleanup_seconds=1,
-        knowledge_outbox=None,
+        knowledge_outbox=probes.get("knowledge_outbox"),
         knowledge_web=probes.get(
             "knowledge_web",
             make_close_probe("knowledge_web", events),
@@ -117,6 +120,7 @@ async def test_runtime_builds_isolated_device_with_shared_clients_and_gates():
     assert runtime.local_device._min_recording_seconds == 0.5
     assert runtime.local_device._min_recording_dbfs == -45.0
     assert runtime.device._controller._playback_timeout_seconds == 300.0
+    assert runtime.device._controller._xzkb_total_timeout_seconds == 120.0
     assert runtime.local_device._audio._no_speech_prompt[:4] == b"RIFF"
     assert runtime.button_workflow is None
     assert runtime.knowledge_outbox is None
@@ -186,6 +190,7 @@ async def test_runtime_builds_optional_knowledge_pipeline(tmp_path, monkeypatch)
     assert runtime.button_workflow is not None
     assert runtime.gpio_button is None
     assert runtime.knowledge_outbox is not None
+    assert isinstance(runtime.knowledge_outbox, AsyncKnowledgeOutbox)
     assert runtime.knowledge_web._outbox is runtime.knowledge_outbox
     assert runtime.knowledge_web._knowledge is runtime.knowledge_mode
     assert runtime.knowledge_web._buttons is runtime.button_workflow
@@ -331,6 +336,40 @@ async def test_runtime_closes_knowledge_web_before_knowledge_resources(tmp_path)
     assert events == ["knowledge_web", "knowledge_mode", "knowledge_sync"]
     assert knowledge_client._client.is_closed
     assert auth._client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_shared_outbox_after_sync_consumer():
+    events = []
+    runtime = make_close_test_runtime(
+        events,
+        knowledge_outbox=make_close_probe("knowledge_outbox", events),
+    )
+
+    await runtime.aclose()
+
+    assert events.index("knowledge_sync") < events.index("knowledge_outbox")
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_continues_after_one_prune_failure():
+    runtime = SimpleNamespace(
+        cleanup_seconds=0.01,
+        sessions=SimpleNamespace(
+            prune=AsyncMock(side_effect=[OSError("temporary"), []])
+        ),
+    )
+    task = asyncio.create_task(cleanup_sessions(runtime))
+    try:
+        for _ in range(50):
+            if runtime.sessions.prune.await_count >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert runtime.sessions.prune.await_count >= 2
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio

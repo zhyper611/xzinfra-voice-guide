@@ -57,6 +57,7 @@ class GuideController:
         faq_cache: FaqCache | None = None,
         prepared_audio: PreparedAudioStore | None = None,
         playback_timeout_seconds: float = 300.0,
+        xzkb_total_timeout_seconds: float = 120.0,
     ) -> None:
         self._state: GuideStateStore = state
         self._xzkb = xzkb
@@ -66,6 +67,7 @@ class GuideController:
         self._faq_cache = faq_cache
         self._prepared_audio = prepared_audio
         self._playback_timeout_seconds = playback_timeout_seconds
+        self._xzkb_total_timeout_seconds = xzkb_total_timeout_seconds
         self._playback_timeout_handle: asyncio.TimerHandle | None = None
         self._playback_generation = 0
         self._messages: list[dict[str, str]] = []
@@ -163,30 +165,36 @@ class GuideController:
                     timing.enter_xzkb_slot()
                 await self._state.set_message("正在查询展项资料")
                 observer = self._xzkb_observer(timing)
-                for max_tokens in (None, 8000):
-                    if timing is not None:
-                        timing.start_xzkb_request()
-                    stream = self._start_xzkb_stream(
-                        request_messages,
-                        max_tokens,
-                        observer,
-                    )
-                    async with aclosing(stream):
-                        async for event in stream:
-                            if timing is not None and event.text.strip():
-                                timing.receive_xzkb_text()
-                            await self._state.append_answer(event.text)
-                    if self._state.snapshot.answer.strip():
-                        break
-                    await self._state.set_message(
-                        "知识库正在重新生成讲解内容"
-                    )
+                async with asyncio.timeout(self._xzkb_total_timeout_seconds):
+                    for max_tokens in (None, 8000):
+                        if timing is not None:
+                            timing.start_xzkb_request()
+                        stream = self._start_xzkb_stream(
+                            request_messages,
+                            max_tokens,
+                            observer,
+                        )
+                        async with aclosing(stream):
+                            async for event in stream:
+                                if timing is not None and event.text.strip():
+                                    timing.receive_xzkb_text()
+                                await self._state.append_answer(event.text)
+                        if self._state.snapshot.answer.strip():
+                            break
+                        await self._state.set_message(
+                            "知识库正在重新生成讲解内容"
+                        )
         except QueueWaitTimeout as error:
             if timing is not None:
                 timing.finish_xzkb_queue()
                 timing.fail("xzkb_queue", error)
             await self._degrade("当前使用人数较多，请稍后重试")
             raise GuideServiceUnavailable("capacity") from error
+        except TimeoutError as error:
+            if timing is not None:
+                timing.fail("xzkb", error)
+            await self._degrade("知识库响应超时，请稍后重试")
+            raise GuideServiceUnavailable("xzkb") from error
         except (httpx.HTTPError, ValueError, TypeError) as error:
             if timing is not None:
                 timing.fail("xzkb", error)

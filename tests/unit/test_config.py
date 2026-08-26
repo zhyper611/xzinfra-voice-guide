@@ -60,6 +60,7 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.xzkb_concurrency == 4
     assert settings.tts_concurrency == 2
     assert settings.queue_timeout_seconds == 120.0
+    assert settings.xzkb_total_timeout_seconds == 120.0
     assert settings.audio_ttl_seconds == 600.0
     assert settings.audio_items_per_session == 3
     assert settings.device_api_key.get_secret_value() == "device-test-key"
@@ -67,6 +68,14 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.faq_cache_enabled is True
     assert settings.faq_cache_file == Path("config/faq_cache.yaml")
     assert settings.faq_prepared_audio_enabled is True
+    assert settings.faq_pending_audio_dir == (
+        Path.home()
+        / ".local"
+        / "share"
+        / "showroom-guide"
+        / "prepared-audio"
+        / "pending"
+    )
     assert settings.local_recording_max_seconds == 60.0
     assert settings.local_recording_min_seconds == 0.5
     assert settings.local_recording_min_dbfs == -45.0

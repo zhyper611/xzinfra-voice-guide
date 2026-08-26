@@ -31,6 +31,18 @@ class FakeWorkflow:
         self.ready.set()
 
 
+class BlockingWorkflow(FakeWorkflow):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def short_press(self):
+        self.events.append("short")
+        self.started.set()
+        await self.release.wait()
+
+
 @pytest.mark.asyncio
 async def test_release_dispatches_short_press_and_held_release_is_not_duplicated():
     workflow = FakeWorkflow()
@@ -56,3 +68,33 @@ async def test_release_dispatches_short_press_and_held_release_is_not_duplicated
     button = service.button
     await service.aclose()
     assert button.closed is True
+
+
+@pytest.mark.asyncio
+async def test_busy_button_keeps_at_most_one_pending_event():
+    workflow = BlockingWorkflow()
+    service = GpioButtonService(
+        pin=17,
+        hold_seconds=1.2,
+        workflow=workflow,
+        button_factory=FakeButton,
+    )
+    service.start()
+    try:
+        service._dispatch("short")
+        await asyncio.wait_for(workflow.started.wait(), timeout=0.2)
+        service._dispatch("short")
+        service._dispatch("short")
+        service._dispatch("short")
+        await asyncio.sleep(0)
+
+        assert service._queue.qsize() == 1
+        workflow.release.set()
+        for _ in range(10):
+            if len(workflow.events) == 2:
+                break
+            await asyncio.sleep(0)
+        assert workflow.events == ["short", "short"]
+    finally:
+        workflow.release.set()
+        await service.aclose()
