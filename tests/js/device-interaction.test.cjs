@@ -12,7 +12,35 @@ const {
   createWavReviewGate,
   rehydrateKnowledgeReview,
   resolveKnowledgeDraftTransition,
+  resolveAudioAvailability,
 } = require("../../src/showroom_guide/web/device-interaction.js");
+
+test("local dialogue requires both microphone and speaker", () => {
+  assert.deepEqual(resolveAudioAvailability({
+    capture_available: false,
+    playback_available: true,
+    audio_device_error: null,
+  }), {
+    ready: false,
+    message: "未检测到可用麦克风",
+  });
+  assert.deepEqual(resolveAudioAvailability({
+    capture_available: true,
+    playback_available: false,
+    audio_device_error: null,
+  }), {
+    ready: false,
+    message: "未检测到可用扬声器",
+  });
+  assert.deepEqual(resolveAudioAvailability({
+    capture_available: true,
+    playback_available: true,
+    audio_device_error: null,
+  }), {
+    ready: true,
+    message: "麦克风和扬声器已就绪",
+  });
+});
 
 class FakeEventTarget {
   constructor() {

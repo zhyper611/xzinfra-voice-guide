@@ -52,6 +52,7 @@ const knowledgeDraft = document.querySelector("#knowledge-draft");
 const knowledgeSync = document.querySelector("#knowledge-sync");
 const knowledgeSyncState = document.querySelector("#knowledge-sync-state");
 const knowledgeContext = document.querySelector("#knowledge-context");
+const audioDeviceStatus = document.querySelector("#audio-device-status");
 
 const phaseLabels = {
   idle: "待机",
@@ -105,6 +106,7 @@ let knowledgeReviewAudioPath = null;
 let knowledgeReviewPlayback = null;
 let unifiedGesture = null;
 let unifiedInput = null;
+let audioAvailability = { ready: false, message: "正在检测麦克风和扬声器" };
 
 const wavReviewGate = ShowroomDeviceInteraction.createWavReviewGate({
   revokeObjectUrl: (objectUrl) => URL.revokeObjectURL(objectUrl),
@@ -434,7 +436,15 @@ function updateUnifiedAction() {
   const mode = knowledgeSnapshot?.mode_state || "inactive";
   const knowledgeActive = mode !== "inactive";
   const keyReady = Boolean(deviceKey.value.trim());
-  const disabled = !keyReady || (!action.short && !action.long);
+  const requiresAudio = (
+    (mode === "inactive" && currentPhase !== "recording")
+    || mode === "ready"
+  );
+  const disabled = (
+    !keyReady
+    || (!action.short && !action.long)
+    || (requiresAudio && !audioAvailability.ready)
+  );
 
   unifiedActionLabel.textContent = action.label;
   unifiedAction.dataset.state = knowledgeActive ? mode : currentPhase;
@@ -533,6 +543,8 @@ function handleKnowledgeError(error, { showFailure = true, captureEntry = false 
 }
 
 function renderState(snapshot) {
+  audioAvailability = ShowroomDeviceInteraction.resolveAudioAvailability(snapshot);
+  audioDeviceStatus.textContent = audioAvailability.message;
   currentPhase = snapshot.phase || "idle";
   hasLastRecording = Boolean(snapshot.has_last_recording);
   phasePill.dataset.phase = currentPhase;

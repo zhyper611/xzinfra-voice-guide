@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     device_api_key: SecretStr = Field(min_length=8)
     device_max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     local_recording_max_seconds: float = Field(default=60.0, gt=0)
+    local_recording_max_bytes: int = Field(default=4 * 1024 * 1024, gt=0)
     local_recording_min_seconds: float = Field(default=0.5, gt=0)
     local_recording_min_dbfs: float = Field(default=-45.0, ge=-96.0, lt=0)
     tts_voice: str = "alloy"
@@ -55,8 +56,11 @@ class Settings(BaseSettings):
     xzkb_concurrency: int = Field(default=4, gt=0)
     tts_concurrency: int = Field(default=2, gt=0)
     queue_timeout_seconds: float = Field(default=120.0, gt=0)
+    answer_max_chars: int = Field(default=220, ge=40)
     audio_ttl_seconds: float = Field(default=600.0, gt=0)
     audio_items_per_session: int = Field(default=3, gt=0)
+    audio_max_item_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+    audio_total_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     capture_device: str = "default"
     playback_device: str = "default"
     sample_rate: int = Field(default=16000, gt=0)
@@ -131,6 +135,12 @@ class Settings(BaseSettings):
     def validate_local_recording_limits(self) -> Self:
         if self.local_recording_min_seconds >= self.local_recording_max_seconds:
             raise ValueError("最短录音时长必须小于最长录音时长")
+        return self
+
+    @model_validator(mode="after")
+    def validate_audio_cache_limits(self) -> Self:
+        if self.audio_max_item_bytes > self.audio_total_bytes:
+            raise ValueError("单条音频上限不能大于音频缓存总上限")
         return self
 
     @model_validator(mode="after")

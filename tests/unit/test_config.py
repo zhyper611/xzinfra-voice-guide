@@ -63,6 +63,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.xzkb_total_timeout_seconds == 120.0
     assert settings.audio_ttl_seconds == 600.0
     assert settings.audio_items_per_session == 3
+    assert settings.audio_max_item_bytes == 8 * 1024 * 1024
+    assert settings.audio_total_bytes == 256 * 1024 * 1024
     assert settings.device_api_key.get_secret_value() == "device-test-key"
     assert settings.device_max_upload_bytes == 10 * 1024 * 1024
     assert settings.faq_cache_enabled is True
@@ -79,6 +81,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.local_recording_max_seconds == 60.0
     assert settings.local_recording_min_seconds == 0.5
     assert settings.local_recording_min_dbfs == -45.0
+    assert settings.local_recording_max_bytes == 4 * 1024 * 1024
+    assert settings.answer_max_chars == 220
     assert settings.knowledge_web_lease_seconds == 120.0
 
 

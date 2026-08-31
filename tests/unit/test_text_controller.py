@@ -28,6 +28,8 @@ def make_controller(
     prepared_audio=None,
     playback_timeout_seconds=300,
     xzkb_total_timeout_seconds=120,
+    answer_max_chars=220,
+    tts_audio_max_bytes=8 * 1024 * 1024,
 ):
     state = GuideStateStore()
     xzkb = MagicMock()
@@ -42,6 +44,8 @@ def make_controller(
         prepared_audio=prepared_audio,
         playback_timeout_seconds=playback_timeout_seconds,
         xzkb_total_timeout_seconds=xzkb_total_timeout_seconds,
+        answer_max_chars=answer_max_chars,
+        tts_audio_max_bytes=tts_audio_max_bytes,
     )
     return controller, state, xzkb, speech
 
@@ -282,6 +286,20 @@ async def test_tts_failure_keeps_answer_and_returns_no_audio():
 
 
 @pytest.mark.asyncio
+async def test_oversized_tts_audio_degrades_to_text_answer():
+    controller, state, xzkb, speech = make_controller(tts_audio_max_bytes=4)
+    xzkb.stream_chat.return_value = async_events("文字答案。")
+    speech.synthesize.return_value = b"12345"
+
+    result = await controller.ask_text("问题")
+
+    assert result.answer == "文字答案。"
+    assert result.audio is None
+    assert result.warning == "语音暂时不可用，您仍可阅读文字答案"
+    assert state.snapshot.phase is GuidePhase.DEGRADED
+
+
+@pytest.mark.asyncio
 async def test_empty_question_is_rejected_before_remote_calls():
     controller, _, xzkb, _ = make_controller()
 
@@ -330,14 +348,14 @@ async def test_unanchored_reference_asks_for_exhibit_without_calling_xzkb():
 
 
 @pytest.mark.asyncio
-async def test_long_xzkb_answer_is_consumed_and_preserved_in_full():
-    controller, state, xzkb, speech = make_controller()
+async def test_long_xzkb_answer_is_shortened_at_sentence_boundary_before_tts():
+    controller, state, xzkb, speech = make_controller(answer_max_chars=12)
     stream_closed = asyncio.Event()
 
     async def oversized_stream():
         try:
-            yield ChatStreamEvent(text="甲" * 800)
-            yield ChatStreamEvent(text="乙" * 800)
+            yield ChatStreamEvent(text="第一句介绍。第二句说明。")
+            yield ChatStreamEvent(text="第三句不应播报。")
         finally:
             stream_closed.set()
 
@@ -346,7 +364,7 @@ async def test_long_xzkb_answer_is_consumed_and_preserved_in_full():
 
     result = await controller.ask_text("介绍矿山巡检系统")
 
-    expected_answer = "甲" * 800 + "乙" * 800
+    expected_answer = "第一句介绍。第二句说明。"
     assert result.answer == expected_answer
     assert state.snapshot.answer == result.answer
     assert stream_closed.is_set()

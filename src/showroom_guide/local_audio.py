@@ -15,7 +15,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 ProcessFactory = Callable[..., Awaitable[asyncio.subprocess.Process]]
+DeviceCheck = Callable[[], Awaitable[None]]
 RECORDING_START_SETTLE_SECONDS = 0.3
+
+
+async def _skip_device_check() -> None:
+    return None
 
 
 def _create_chirp_wav(
@@ -75,6 +80,9 @@ class LocalAudioController:
         prompts: dict[str, bytes] | None = None,
         process_factory: ProcessFactory = asyncio.create_subprocess_exec,
         process_stop_seconds: float = 5.0,
+        max_recording_bytes: int = 4 * 1024 * 1024,
+        ensure_capture_available: DeviceCheck = _skip_device_check,
+        ensure_playback_available: DeviceCheck = _skip_device_check,
     ) -> None:
         self._sample_rate = sample_rate
         self._capture_device = capture_device
@@ -83,6 +91,9 @@ class LocalAudioController:
         self._prompts = dict(prompts or {})
         self._process_factory = process_factory
         self._process_stop_seconds = process_stop_seconds
+        self._max_recording_bytes = max_recording_bytes
+        self._ensure_capture_available = ensure_capture_available
+        self._ensure_playback_available = ensure_playback_available
         self._record_process: asyncio.subprocess.Process | None = None
         self._recording_path: Path | None = None
         self._playback_process: asyncio.subprocess.Process | None = None
@@ -105,11 +116,15 @@ class LocalAudioController:
     def is_playing(self) -> bool:
         return self._playback_process is not None
 
+    async def ensure_ready_for_recording(self) -> None:
+        await self._ensure_capture_available()
+
     async def start_recording(self) -> None:
         if self.is_recording or self.is_playing:
             raise LocalAudioBusy("音频设备正在使用")
 
         await asyncio.sleep(RECORDING_START_SETTLE_SECONDS)
+        await self.ensure_ready_for_recording()
         descriptor, raw_path = tempfile.mkstemp(suffix=".wav")
         os.close(descriptor)
         path = Path(raw_path)
@@ -134,7 +149,7 @@ class LocalAudioController:
             process = await self._process_factory(
                 *command,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             self._record_process = process
             self._recording_path = path
@@ -174,6 +189,8 @@ class LocalAudioController:
                 accepted_returncodes.add(1)
             if process.returncode not in accepted_returncodes:
                 raise LocalAudioError("录音进程异常退出，请检查默认输入")
+            if path.stat().st_size > self._max_recording_bytes:
+                raise LocalAudioError("录音文件过大，请缩短录音时间")
             audio = path.read_bytes()
             if not audio:
                 raise LocalAudioError("录音文件为空，请检查默认输入")
@@ -202,6 +219,7 @@ class LocalAudioController:
     async def play(self, audio: bytes) -> None:
         if self.is_recording or self.is_playing:
             raise LocalAudioBusy("音频设备正在使用")
+        await self._ensure_playback_available()
 
         command = ["pw-play"]
         if self._playback_device != "default":

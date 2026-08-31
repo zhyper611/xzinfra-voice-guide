@@ -25,7 +25,12 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from showroom_guide.audio_store import AudioNotFound, AudioStore
+from showroom_guide.audio_store import AudioByteBudget, AudioNotFound, AudioStore
+from showroom_guide.audio_devices import (
+    AudioDeviceMonitor,
+    AudioDeviceStatus,
+    probe_pipewire_devices,
+)
 from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.button_workflow import DeviceButtonWorkflow
 from showroom_guide.clients.speech import SpeechClient
@@ -141,6 +146,11 @@ class DeviceTurnResponse(BaseModel):
 
 class DeviceStateResponse(GuideSnapshot):
     has_last_recording: bool
+    capture_available: bool
+    playback_available: bool
+    capture_name: str | None
+    playback_name: str | None
+    audio_device_error: str | None
 
 
 class KnowledgeStateResponse(BaseModel):
@@ -190,6 +200,7 @@ class Runtime:
     cleanup_seconds: float
     knowledge_outbox: AsyncKnowledgeOutbox | None
     knowledge_web: KnowledgeWebController
+    audio_devices: AudioDeviceMonitor | None = None
     faq_cache: FaqCache | None = None
     prepared_audio: PreparedAudioStore | None = None
     faq_admin_service: FaqCacheReadService | None = None
@@ -236,6 +247,8 @@ class Runtime:
 
         if self.gpio_button is not None:
             await attempt(self.gpio_button.aclose())
+        if self.audio_devices is not None:
+            await attempt(self.audio_devices.aclose())
         await attempt(self.knowledge_web.aclose())
         if self.knowledge_mode is not None:
             await attempt(self.knowledge_mode.aclose())
@@ -325,6 +338,8 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         configured.queue_timeout_seconds,
     )
 
+    audio_budget = AudioByteBudget(configured.audio_total_bytes)
+
     def controller_factory(state: GuideStateStore) -> GuideController:
         return GuideController(
             state,
@@ -336,6 +351,8 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             prepared_audio=prepared_audio,
             playback_timeout_seconds=configured.playback_timeout_seconds,
             xzkb_total_timeout_seconds=configured.xzkb_total_timeout_seconds,
+            answer_max_chars=configured.answer_max_chars,
+            tts_audio_max_bytes=configured.audio_max_item_bytes,
         )
 
     sessions = SessionManager(
@@ -344,6 +361,8 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         idle_seconds=configured.session_idle_seconds,
         audio_ttl_seconds=configured.audio_ttl_seconds,
         audio_items_per_session=configured.audio_items_per_session,
+        audio_max_item_bytes=configured.audio_max_item_bytes,
+        audio_budget=audio_budget,
     )
     device_state = GuideStateStore()
     device = DeviceVoiceSession(
@@ -353,8 +372,30 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         audio=AudioStore(
             max_items=configured.audio_items_per_session,
             ttl_seconds=configured.audio_ttl_seconds,
+            max_item_bytes=configured.audio_max_item_bytes,
+            budget=audio_budget,
         ),
     )
+    async def probe_audio_devices() -> AudioDeviceStatus:
+        return await probe_pipewire_devices(
+            capture_target=configured.capture_device,
+            playback_target=configured.playback_device,
+        )
+
+    audio_devices = AudioDeviceMonitor(probe=probe_audio_devices)
+
+    async def ensure_local_audio_available() -> None:
+        status = await audio_devices.refresh()
+        if not status.capture_available:
+            raise LocalAudioError("未检测到可用麦克风")
+        if not status.playback_available:
+            raise LocalAudioError("未检测到可用扬声器")
+
+    async def ensure_playback_available() -> None:
+        status = await audio_devices.refresh()
+        if not status.playback_available:
+            raise LocalAudioError("未检测到可用扬声器")
+
     local_audio = LocalAudioController(
         sample_rate=configured.sample_rate,
         capture_device=configured.capture_device,
@@ -365,6 +406,9 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             for name, path in LOCAL_PROMPT_PATHS.items()
             if path.exists()
         },
+        ensure_capture_available=ensure_local_audio_available,
+        ensure_playback_available=ensure_playback_available,
+        max_recording_bytes=configured.local_recording_max_bytes,
     )
     local_device = LocalDeviceWorkflow(
         session=device,
@@ -441,6 +485,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         speech=speech,
         knowledge_outbox=knowledge_outbox,
         knowledge_web=knowledge_web,
+        audio_devices=audio_devices,
         faq_cache=faq_cache,
         prepared_audio=prepared_audio,
         faq_admin_service=faq_admin_service,
@@ -488,10 +533,13 @@ def create_app(runtime: Runtime) -> FastAPI:
         runtime.cleanup_task = cleanup_task
         knowledge_sync = getattr(runtime, "knowledge_sync", None)
         gpio_button = getattr(runtime, "gpio_button", None)
+        audio_devices = getattr(runtime, "audio_devices", None)
         if knowledge_sync is not None:
             knowledge_sync.start()
         if gpio_button is not None:
             gpio_button.start()
+        if audio_devices is not None:
+            audio_devices.start()
         try:
             yield
         finally:
@@ -560,8 +608,24 @@ def create_app(runtime: Runtime) -> FastAPI:
             else:
                 checks["knowledge_outbox"] = "ok"
         ready = all(value != "failed" for value in checks.values())
+        monitor = getattr(runtime, "audio_devices", None)
+        audio_status = (
+            monitor.status
+            if monitor is not None
+            else AudioDeviceStatus.unavailable("未配置音频设备监测")
+        )
         return JSONResponse(
-            {"status": "ready" if ready else "not_ready", "checks": checks},
+            {
+                "status": "ready" if ready else "not_ready",
+                "checks": checks,
+                "local_audio": {
+                    "capture_available": audio_status.capture_available,
+                    "playback_available": audio_status.playback_available,
+                    "capture_name": audio_status.capture_name,
+                    "playback_name": audio_status.playback_name,
+                    "error": audio_status.error,
+                },
+            },
             status_code=200 if ready else 503,
             headers={"Cache-Control": "no-store"},
         )
@@ -1054,9 +1118,20 @@ def create_app(runtime: Runtime) -> FastAPI:
         dependencies=[Depends(require_device_key)],
     )
     async def get_device_state() -> DeviceStateResponse:
+        monitor = getattr(runtime, "audio_devices", None)
+        audio_status = (
+            monitor.status
+            if monitor is not None
+            else AudioDeviceStatus.unavailable("未配置音频设备监测")
+        )
         return DeviceStateResponse(
             **runtime.device.snapshot.model_dump(),
             has_last_recording=runtime.local_device.has_last_recording,
+            capture_available=audio_status.capture_available,
+            playback_available=audio_status.playback_available,
+            capture_name=audio_status.capture_name,
+            playback_name=audio_status.playback_name,
+            audio_device_error=audio_status.error,
         )
 
     @app.post(

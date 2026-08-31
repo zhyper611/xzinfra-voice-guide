@@ -104,7 +104,7 @@ async def test_records_pcm_wav_and_plays_from_stdin():
         "s16",
     )
     assert "--target" not in record_args
-    assert record_kwargs["stderr"] is asyncio.subprocess.PIPE
+    assert record_kwargs["stderr"] is asyncio.subprocess.DEVNULL
     if os.name == "posix":
         assert os.stat(recording_path).st_mode & 0o777 == 0o600
 
@@ -121,6 +121,89 @@ async def test_records_pcm_wav_and_plays_from_stdin():
     assert play_kwargs["stdin"] is asyncio.subprocess.PIPE
     assert play_kwargs["stderr"] is asyncio.subprocess.PIPE
     assert play_process.communicated_input == captured
+
+
+@pytest.mark.asyncio
+async def test_checks_capture_device_immediately_before_starting_process():
+    events = []
+
+    async def ensure_capture_available():
+        events.append("capture-check")
+
+    async def process_factory(*args, **kwargs):
+        events.append(args[0])
+        Path(args[-1]).write_bytes(make_wav())
+        return FakeProcess()
+
+    controller = LocalAudioController(
+        ensure_capture_available=ensure_capture_available,
+        process_factory=process_factory,
+    )
+
+    await controller.start_recording()
+
+    assert events == ["capture-check", "pw-record"]
+    await controller.abort_recording()
+
+
+@pytest.mark.asyncio
+async def test_capture_check_failure_does_not_create_recording_process():
+    process_factory_called = False
+
+    async def ensure_capture_available():
+        raise LocalAudioError("未检测到可用麦克风")
+
+    async def process_factory(*args, **kwargs):
+        nonlocal process_factory_called
+        process_factory_called = True
+        return FakeProcess()
+
+    controller = LocalAudioController(
+        ensure_capture_available=ensure_capture_available,
+        process_factory=process_factory,
+    )
+
+    with pytest.raises(LocalAudioError, match="未检测到可用麦克风"):
+        await controller.start_recording()
+
+    assert process_factory_called is False
+
+
+@pytest.mark.asyncio
+async def test_rejects_recording_larger_than_configured_limit():
+    async def process_factory(*args, **kwargs):
+        Path(args[-1]).write_bytes(b"x" * 101)
+        return FakeProcess()
+
+    controller = LocalAudioController(
+        max_recording_bytes=100,
+        process_factory=process_factory,
+    )
+
+    await controller.start_recording()
+    with pytest.raises(LocalAudioError, match="录音文件过大"):
+        await controller.stop_recording()
+
+
+@pytest.mark.asyncio
+async def test_checks_playback_device_before_starting_process():
+    events = []
+
+    async def ensure_playback_available():
+        events.append("playback-check")
+
+    async def process_factory(*args, **kwargs):
+        events.append(args[0])
+        return FakeProcess()
+
+    controller = LocalAudioController(
+        ensure_playback_available=ensure_playback_available,
+        process_factory=process_factory,
+    )
+
+    await controller.play(make_wav())
+
+    assert events == ["playback-check", "pw-play"]
 
 
 @pytest.mark.asyncio

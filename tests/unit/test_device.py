@@ -123,6 +123,11 @@ def test_validate_wav_accepts_16khz_16bit_mono_pcm():
     validate_wav(make_wav())
 
 
+def test_validate_wav_rejects_file_without_audio_frames():
+    with pytest.raises(InvalidWavFormat, match="音频帧"):
+        validate_wav(make_wav(frames=0))
+
+
 def test_inspect_wav_returns_duration_and_dbfs():
     metrics = inspect_wav(make_wav(frames=16000, sample=8192))
 
