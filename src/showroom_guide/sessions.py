@@ -2,6 +2,7 @@ import asyncio
 import secrets
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from showroom_guide.audio_store import AudioStore
@@ -23,10 +24,19 @@ class GuideSession:
     last_active_at: float
     verdict_workflow: object | None = None
     connected_clients: int = 0
+    active_operations: int = 0
 
     @property
     def protected(self) -> bool:
-        return self.connected_clients > 0 or self.controller.is_busy
+        return (
+            self.connected_clients > 0
+            or self.active_operations > 0
+            or self.controller.is_busy
+            or (
+                self.verdict_workflow is not None
+                and self.verdict_workflow.is_busy
+            )
+        )
 
 
 class SessionManager:
@@ -72,6 +82,8 @@ class SessionManager:
                 if not candidates:
                     raise SessionCapacityReached
                 oldest = min(candidates, key=lambda item: item.last_active_at)
+                if oldest.verdict_workflow is not None:
+                    await oldest.verdict_workflow.leave()
                 oldest.audio.clear()
                 self._sessions.pop(oldest.session_id, None)
             state = GuideStateStore()
@@ -99,6 +111,16 @@ class SessionManager:
     def touch(self, session: GuideSession) -> None:
         session.last_active_at = self._clock()
 
+    @asynccontextmanager
+    async def protect(self, session: GuideSession):
+        session.active_operations += 1
+        self.touch(session)
+        try:
+            yield
+        finally:
+            session.active_operations = max(0, session.active_operations - 1)
+            self.touch(session)
+
     async def connect(self, session: GuideSession) -> None:
         async with self._lock:
             session.connected_clients += 1
@@ -110,6 +132,13 @@ class SessionManager:
             self.touch(session)
 
     async def reset(self, session: GuideSession) -> None:
+        if session.controller.is_busy:
+            await session.controller.reset()
+            session.audio.clear()
+            self.touch(session)
+            return
+        if session.verdict_workflow is not None:
+            await session.verdict_workflow.leave()
         await session.controller.reset()
         session.audio.clear()
         self.touch(session)

@@ -5,6 +5,7 @@ from showroom_guide.knowledge_mode import (
     KnowledgeLongPressResult,
     KnowledgeModeState,
 )
+from showroom_guide.models import InteractionMode
 
 
 class ButtonInteractionMode(StrEnum):
@@ -13,16 +14,26 @@ class ButtonInteractionMode(StrEnum):
     KNOWLEDGE = "knowledge"
 
 
+_PUBLIC_INTERACTION_MODES = {
+    ButtonInteractionMode.DIALOGUE: InteractionMode.CONVERSATION,
+    ButtonInteractionMode.VERDICT: InteractionMode.VERDICT,
+    ButtonInteractionMode.KNOWLEDGE: InteractionMode.KNOWLEDGE,
+}
+
+
 class DeviceButtonWorkflow:
     def __init__(
         self,
         local_device,
         knowledge_workflow,
         verdict_workflow=None,
+        *,
+        state=None,
     ) -> None:
         self._local_device = local_device
         self._knowledge = knowledge_workflow
         self._verdict = verdict_workflow
+        self._state = state
         self._mode = ButtonInteractionMode.DIALOGUE
         self._lock = asyncio.Lock()
         self._knowledge_owner = None
@@ -181,7 +192,12 @@ class DeviceButtonWorkflow:
     async def run_dialogue(self, operation):
         async with self._lock:
             if self._mode is not ButtonInteractionMode.DIALOGUE:
-                raise RuntimeError("设备当前处于知识补充模式")
+                mode_name = (
+                    "是非判断模式"
+                    if self._mode is ButtonInteractionMode.VERDICT
+                    else "知识补充模式"
+                )
+                raise RuntimeError(f"设备当前处于{mode_name}")
             return await operation()
 
     def _require_knowledge_owner(self, owner: object) -> None:
@@ -190,3 +206,5 @@ class DeviceButtonWorkflow:
 
     async def _set_mode(self, mode: ButtonInteractionMode) -> None:
         self._mode = mode
+        if self._state is not None:
+            await self._state.set_interaction_mode(_PUBLIC_INTERACTION_MODES[mode])

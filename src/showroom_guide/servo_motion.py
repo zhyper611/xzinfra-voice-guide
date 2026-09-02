@@ -62,6 +62,7 @@ class ServoMotionOutput:
         no_angle: float = 130,
         thinking_offset: float = 20,
         thinking_step_seconds: float = 0.7,
+        windup_travel_seconds: float = 0.18,
         settle_seconds: float = 0.25,
         neutral_step_seconds: float = 0.2,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -82,6 +83,7 @@ class ServoMotionOutput:
             neutral_angle,
         )
         self._thinking_step_seconds = thinking_step_seconds
+        self._windup_travel_seconds = windup_travel_seconds
         self._settle_seconds = settle_seconds
         self._neutral_step_seconds = neutral_step_seconds
         self._sleep = sleep
@@ -132,6 +134,7 @@ class ServoMotionOutput:
             opposite = Verdict.NO if verdict is Verdict.YES else Verdict.YES
             if not self._set_angle_safely(self._angles[opposite]):
                 return
+            await self._sleep(self._windup_travel_seconds)
             if not self._set_angle_safely(self._angles[verdict]):
                 return
             await self._sleep(self._settle_seconds)

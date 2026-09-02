@@ -21,6 +21,10 @@ from showroom_guide.verdict_motion import (
 logger = logging.getLogger(__name__)
 
 
+class VerdictInProgress(RuntimeError):
+    pass
+
+
 _PROMPTS = {
     VerdictFailure.INVALID_QUESTION: "verdict-invalid",
     VerdictFailure.INSUFFICIENT_EVIDENCE: "verdict-insufficient-evidence",
@@ -38,6 +42,7 @@ class VerdictWorkflow:
         *,
         play_prompt: Callable[[str], object] | None = None,
         timeout_seconds: float = 15.0,
+        prompt_timeout_seconds: float = 5.0,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._client = client
@@ -45,12 +50,18 @@ class VerdictWorkflow:
         self._state = state
         self._play_prompt = play_prompt
         self._timeout_seconds = timeout_seconds
+        self._prompt_timeout_seconds = prompt_timeout_seconds
         self._clock = clock
         self._generation = 0
+        self._run_lock = asyncio.Lock()
 
     @property
     def motion(self) -> VerdictMotionOutput:
         return self._motion
+
+    @property
+    def is_busy(self) -> bool:
+        return self._run_lock.locked()
 
     async def enter(self) -> None:
         self._generation += 1
@@ -58,6 +69,12 @@ class VerdictWorkflow:
         await self._state.set_interaction_mode(InteractionMode.VERDICT)
 
     async def run(self, transcript: str) -> VerdictDecision:
+        if self._run_lock.locked():
+            raise VerdictInProgress("已有是非判断正在处理中")
+        async with self._run_lock:
+            return await self._run(transcript)
+
+    async def _run(self, transcript: str) -> VerdictDecision:
         question = transcript.strip()
         if not question:
             raise ValueError("transcript must not be empty")
@@ -118,6 +135,7 @@ class VerdictWorkflow:
         try:
             result = self._play_prompt(prompt)
             if inspect.isawaitable(result):
-                await result
+                async with asyncio.timeout(self._prompt_timeout_seconds):
+                    await result
         except Exception:
             logger.exception("verdict_prompt_playback_failed prompt=%s", prompt)

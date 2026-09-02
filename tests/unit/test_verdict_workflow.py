@@ -12,7 +12,7 @@ from showroom_guide.verdict import (
     VerdictFailure,
     VerdictScope,
 )
-from showroom_guide.verdict_workflow import VerdictWorkflow
+from showroom_guide.verdict_workflow import VerdictInProgress, VerdictWorkflow
 
 
 class FakeClient:
@@ -165,3 +165,44 @@ async def test_leave_invalidates_late_result_and_resets_motion():
     assert state.snapshot.verdict_phase is VerdictPhase.IDLE
     assert state.snapshot.interaction_mode is InteractionMode.CONVERSATION
     assert state.snapshot.phase is GuidePhase.IDLE
+
+
+@pytest.mark.asyncio
+async def test_same_session_rejects_concurrent_verdict_turn():
+    client = DeferredClient()
+    workflow = VerdictWorkflow(client, FakeMotion(), GuideStateStore())
+    first = asyncio.create_task(workflow.run("第一个问题"))
+    await client.started.wait()
+
+    with pytest.raises(VerdictInProgress):
+        await workflow.run("第二个问题")
+
+    client.release.set()
+    await first
+
+
+@pytest.mark.asyncio
+async def test_hanging_failure_prompt_times_out_without_blocking_result():
+    prompt_started = asyncio.Event()
+    prompt_cancelled = asyncio.Event()
+
+    async def hanging_prompt(_name):
+        prompt_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            prompt_cancelled.set()
+
+    workflow = VerdictWorkflow(
+        FakeClient(error=VerdictClientError("unavailable")),
+        FakeMotion(),
+        GuideStateStore(),
+        play_prompt=hanging_prompt,
+        prompt_timeout_seconds=0.01,
+    )
+
+    result = await workflow.run("今天适合散步吗？")
+
+    assert result.failure is VerdictFailure.SERVICE_FAILURE
+    assert prompt_started.is_set()
+    assert prompt_cancelled.is_set()

@@ -12,6 +12,8 @@ from showroom_guide.knowledge_mode import (
     KnowledgeModeState,
     KnowledgeModeWorkflow,
 )
+from showroom_guide.models import InteractionMode
+from showroom_guide.state import GuideStateStore
 
 
 def make_wav():
@@ -303,6 +305,17 @@ async def test_web_operation_is_rejected_while_in_knowledge_mode():
 
 
 @pytest.mark.asyncio
+async def test_web_operation_reports_verdict_mode_when_verdict_is_active():
+    local_device = MagicMock(is_idle=True, is_recording=False)
+    verdict = MagicMock(enter=AsyncMock(), leave=AsyncMock())
+    workflow = DeviceButtonWorkflow(local_device, MagicMock(), verdict)
+    await workflow.long_press()
+
+    with pytest.raises(RuntimeError, match="是非判断模式"):
+        await workflow.run_dialogue(AsyncMock())
+
+
+@pytest.mark.asyncio
 async def test_long_press_cycles_conversation_verdict_knowledge_when_enabled():
     local_device = MagicMock(is_idle=True, is_recording=False)
     knowledge = MagicMock()
@@ -323,6 +336,33 @@ async def test_long_press_cycles_conversation_verdict_knowledge_when_enabled():
     verdict.leave.assert_awaited_once_with()
     knowledge.enter.assert_awaited_once_with()
     assert workflow.mode is ButtonInteractionMode.KNOWLEDGE
+
+
+@pytest.mark.asyncio
+async def test_mode_cycle_keeps_public_device_snapshot_in_sync():
+    local_device = MagicMock(is_idle=True, is_recording=False)
+    knowledge = MagicMock()
+    knowledge.enter = AsyncMock()
+    knowledge.long_press = AsyncMock(
+        return_value=KnowledgeLongPressResult(exited=True, saved_entry=None)
+    )
+    state = GuideStateStore()
+    verdict = MagicMock(enter=AsyncMock(), leave=AsyncMock())
+    workflow = DeviceButtonWorkflow(
+        local_device,
+        knowledge,
+        verdict,
+        state=state,
+    )
+
+    await workflow.long_press()
+    assert state.snapshot.interaction_mode is InteractionMode.VERDICT
+
+    await workflow.long_press()
+    assert state.snapshot.interaction_mode is InteractionMode.KNOWLEDGE
+
+    await workflow.long_press()
+    assert state.snapshot.interaction_mode is InteractionMode.CONVERSATION
 
 
 @pytest.mark.asyncio

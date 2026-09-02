@@ -1409,12 +1409,17 @@ async function submitVerdictWav(file) {
   audioHint.textContent = "是非模式不生成语音回答";
   statusMessage.textContent = "AI 正在进行是非判断";
   currentPhase = "thinking";
-  servoSimulator.startThinking();
+  servoSimulator?.startThinking();
   updateControls();
   const body = new FormData();
   body.append("file", file, file.name || "verdict.wav");
   const response = await request("/api/device/verdict/turn", { method: "POST", body });
   await renderVerdictState(await response.json());
+}
+
+function failVerdictSimulation() {
+  currentPhase = "idle";
+  servoSimulator?.showNeutral(true);
 }
 
 async function runVerdictShortPress() {
@@ -1441,7 +1446,7 @@ async function runVerdictShortPress() {
     }
   } catch (error) {
     await browserRecorder?.cancel();
-    currentPhase = "idle";
+    failVerdictSimulation();
     showError(error);
   } finally {
     setOperationPending(false);
@@ -1607,6 +1612,7 @@ deviceForm.addEventListener("submit", async (event) => {
     if (wavPurpose === "knowledge") {
       handleKnowledgeError(error);
     } else {
+      if (wavPurpose === "verdict") failVerdictSimulation();
       showError(error);
       audioHint.textContent = "语音尚未生成";
     }

@@ -101,7 +101,7 @@ from showroom_guide.servo_motion import (
 )
 from showroom_guide.state import GuideStateStore
 from showroom_guide.verdict_motion import WebSimulationOutput
-from showroom_guide.verdict_workflow import VerdictWorkflow
+from showroom_guide.verdict_workflow import VerdictInProgress, VerdictWorkflow
 
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -114,6 +114,14 @@ LOCAL_PROMPT_PATHS = {
     "tts-unavailable": Path(__file__).parent / "assets" / "tts-unavailable.wav",
     "knowledge-mode": Path(__file__).parent / "assets" / "knowledge-mode.wav",
     "knowledge-saved": Path(__file__).parent / "assets" / "knowledge-saved.wav",
+    "verdict-invalid": Path(__file__).parent / "assets" / "verdict-invalid.wav",
+    "verdict-insufficient-evidence": (
+        Path(__file__).parent / "assets" / "verdict-insufficient-evidence.wav"
+    ),
+    "verdict-high-risk": Path(__file__).parent / "assets" / "verdict-high-risk.wav",
+    "verdict-unavailable": (
+        Path(__file__).parent / "assets" / "verdict-unavailable.wav"
+    ),
 }
 SESSION_COOKIE = "showroom_session"
 logger = logging.getLogger(__name__)
@@ -517,6 +525,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             local_device,
             knowledge_mode,
             verdict_workflow,
+            state=device_state,
         )
     gpio_button = None
     if configured.gpio_button_enabled:
@@ -595,7 +604,10 @@ def create_app(runtime: Runtime) -> FastAPI:
         if knowledge_sync is not None:
             knowledge_sync.start()
         if gpio_button is not None:
-            gpio_button.start()
+            try:
+                gpio_button.start()
+            except Exception:
+                logger.exception("gpio_button_start_failed")
         if servo_motion is not None:
             await servo_motion.enter_mode()
         try:
@@ -1176,34 +1188,40 @@ def create_app(runtime: Runtime) -> FastAPI:
         file: UploadFile = File(...),
     ) -> GuideSnapshot:
         session = await establish_http_session(request, response)
-        workflow = session.verdict_workflow
-        if workflow is None:
-            raise HTTPException(status_code=404, detail="是非判断功能未启用")
-        try:
-            audio = await file.read(runtime.device_max_upload_bytes + 1)
-        finally:
-            await file.close()
-        if len(audio) > runtime.device_max_upload_bytes:
-            raise HTTPException(status_code=413, detail="录音文件过大")
-        try:
-            validate_wav(audio)
-            transcript = (
-                await runtime.speech.transcribe(io.BytesIO(audio))
-            ).strip()
-        except InvalidDeviceAudio as error:
-            raise HTTPException(status_code=415, detail=str(error)) from error
-        except (httpx.HTTPError, ValueError) as error:
-            raise HTTPException(
-                status_code=503,
-                detail="语音识别暂时不可用，请稍后重试",
-            ) from error
-        if not transcript:
-            raise HTTPException(status_code=422, detail=NO_SPEECH_MESSAGE)
-        if session.state.snapshot.interaction_mode is not InteractionMode.VERDICT:
-            await workflow.enter()
-        await workflow.run(transcript)
-        runtime.sessions.touch(session)
-        return session.state.snapshot
+        async with runtime.sessions.protect(session):
+            workflow = session.verdict_workflow
+            if workflow is None:
+                raise HTTPException(status_code=404, detail="是非判断功能未启用")
+            try:
+                audio = await file.read(runtime.device_max_upload_bytes + 1)
+            finally:
+                await file.close()
+            if len(audio) > runtime.device_max_upload_bytes:
+                raise HTTPException(status_code=413, detail="录音文件过大")
+            try:
+                validate_wav(audio)
+                transcript = (
+                    await runtime.speech.transcribe(io.BytesIO(audio))
+                ).strip()
+            except InvalidDeviceAudio as error:
+                raise HTTPException(status_code=415, detail=str(error)) from error
+            except (httpx.HTTPError, ValueError) as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="语音识别暂时不可用，请稍后重试",
+                ) from error
+            if not transcript:
+                raise HTTPException(status_code=422, detail=NO_SPEECH_MESSAGE)
+            if session.state.snapshot.interaction_mode is not InteractionMode.VERDICT:
+                await workflow.enter()
+            try:
+                await workflow.run(transcript)
+            except VerdictInProgress as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="已有是非判断正在处理中",
+                ) from error
+            return session.state.snapshot
 
     @app.post(
         "/api/device/knowledge/acquire",

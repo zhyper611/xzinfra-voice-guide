@@ -85,14 +85,21 @@ async def test_enter_mode_centers_then_disables_servo():
 
 
 @pytest.mark.asyncio
-async def test_yes_moves_to_no_side_then_immediately_to_yes_and_holds():
+async def test_yes_allows_windup_travel_before_moving_to_yes_and_holding():
     from showroom_guide.servo_motion import ServoMotionOutput
 
     driver = RecordingDriver()
-    output = ServoMotionOutput(driver, sleep=instant_sleep)
+    delays = []
+
+    async def record_sleep(delay):
+        delays.append(delay)
+        await asyncio.sleep(0)
+
+    output = ServoMotionOutput(driver, sleep=record_sleep)
     await output.thinking(generation=1)
     await wait_for(lambda: len(driver.events) >= 2)
     driver.events.clear()
+    delays.clear()
 
     await output.show_verdict(Verdict.YES, generation=1)
 
@@ -101,6 +108,7 @@ async def test_yes_moves_to_no_side_then_immediately_to_yes_and_holds():
         ("angle", 20),
         ("disable", None),
     ]
+    assert delays == [0.18, 0.25]
     await output.aclose()
 
 

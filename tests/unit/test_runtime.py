@@ -199,6 +199,22 @@ async def test_lifespan_starts_and_closes_servo_once():
 
 
 @pytest.mark.asyncio
+async def test_gpio_start_failure_does_not_abort_web_lifespan():
+    runtime = create_runtime(make_settings())
+    gpio = SimpleNamespace(
+        start=MagicMock(side_effect=OSError("GPIO unavailable")),
+        aclose=AsyncMock(),
+    )
+    runtime.gpio_button = gpio
+    app = create_app(runtime)
+
+    async with app.router.lifespan_context(app):
+        gpio.start.assert_called_once_with()
+
+    gpio.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_runtime_closes_servo_after_gpio_before_other_resources():
     events = []
     runtime = make_close_test_runtime(

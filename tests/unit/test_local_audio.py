@@ -23,6 +23,12 @@ PROMPT_PATH = (
     / "assets"
     / "no-speech-detected.wav"
 )
+VERDICT_PROMPT_PATHS = [
+    PROMPT_PATH.parent / "verdict-invalid.wav",
+    PROMPT_PATH.parent / "verdict-insufficient-evidence.wav",
+    PROMPT_PATH.parent / "verdict-high-risk.wav",
+    PROMPT_PATH.parent / "verdict-unavailable.wav",
+]
 
 
 def make_wav() -> bytes:
@@ -41,6 +47,15 @@ def test_packaged_no_speech_prompt_is_valid_wav():
         assert source.getsampwidth() == 2
         assert source.getframerate() > 0
         assert source.getnframes() > source.getframerate()
+
+
+@pytest.mark.parametrize("prompt_path", VERDICT_PROMPT_PATHS)
+def test_packaged_verdict_failure_prompt_is_valid_wav(prompt_path):
+    with wave.open(str(prompt_path), "rb") as source:
+        assert source.getnchannels() == 1
+        assert source.getsampwidth() == 2
+        assert source.getframerate() > 0
+        assert source.getnframes() > 0
 
 
 class FakeProcess:

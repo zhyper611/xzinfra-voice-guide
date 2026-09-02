@@ -16,6 +16,7 @@ from showroom_guide.controller import (
 from showroom_guide.main import create_app
 from showroom_guide.models import InteractionMode
 from showroom_guide.sessions import SessionManager
+from showroom_guide.verdict_workflow import VerdictInProgress
 
 
 class FakeController:
@@ -100,6 +101,65 @@ def test_web_verdict_turn_uses_isolated_session_workflow():
     workflows[0].enter.assert_awaited_once_with()
     workflows[0].run.assert_awaited_once_with("这是国产芯片吗？")
     runtime.device.process_wav.assert_not_called()
+
+
+def test_web_verdict_turn_holds_session_operation_lease():
+    runtime = FakeRuntime()
+    runtime.sessions.protect = MagicMock(
+        wraps=runtime.sessions.protect
+    )
+
+    def verdict_factory(state):
+        async def enter():
+            await state.set_interaction_mode(InteractionMode.VERDICT)
+
+        workflow = MagicMock()
+        workflow.enter = AsyncMock(side_effect=enter)
+        workflow.run = AsyncMock()
+        workflow.leave = AsyncMock()
+        workflow.is_busy = False
+        return workflow
+
+    runtime.sessions._verdict_factory = verdict_factory
+    runtime.speech = MagicMock()
+    runtime.speech.transcribe = AsyncMock(return_value="这是国产芯片吗？")
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/verdict/turn",
+            headers={"X-Device-Key": "device-test-key"},
+            files={"file": ("question.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    runtime.sessions.protect.assert_called_once()
+
+
+def test_web_verdict_turn_maps_same_session_conflict_to_409():
+    runtime = FakeRuntime()
+
+    def verdict_factory(state):
+        async def enter():
+            await state.set_interaction_mode(InteractionMode.VERDICT)
+
+        workflow = MagicMock()
+        workflow.enter = AsyncMock(side_effect=enter)
+        workflow.run = AsyncMock(side_effect=VerdictInProgress())
+        workflow.leave = AsyncMock()
+        workflow.is_busy = True
+        return workflow
+
+    runtime.sessions._verdict_factory = verdict_factory
+    runtime.speech = MagicMock()
+    runtime.speech.transcribe = AsyncMock(return_value="这是国产芯片吗？")
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/verdict/turn",
+            headers={"X-Device-Key": "device-test-key"},
+            files={"file": ("question.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "已有是非判断正在处理中"
 
 
 def test_index_serves_mobile_question_interface():
@@ -359,7 +419,7 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert "ShowroomBrowserRecorder.create()" in response.text
     assert "ShowroomServoSimulator.bind(servoSimulatorRoot)" in response.text
     assert 'request("/api/device/verdict/turn"' in response.text
-    assert "servoSimulator.startThinking()" in response.text
+    assert "servoSimulator?.startThinking()" in response.text
     assert "servoSimulator.applySessionState(snapshot)" in response.text
     assert 'console.error("servo_simulator_initialization_failed"' in response.text
     assert 'console.error("servo_simulator_update_failed"' in response.text
