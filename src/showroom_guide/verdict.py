@@ -70,6 +70,16 @@ class VerdictDecision:
             failure=failure,
         )
 
+    @classmethod
+    def service_failure(cls) -> "VerdictDecision":
+        return cls.mixed(
+            scope=VerdictScope.INVALID,
+            verdict=Verdict.NEUTRAL,
+            basis=VerdictBasis.NONE,
+            reason="判断服务暂时不可用",
+            failure=VerdictFailure.SERVICE_FAILURE,
+        )
+
 
 class VerdictClientError(RuntimeError):
     pass
