@@ -4,7 +4,7 @@
 
 **Goal:** 在现有树莓派展厅讲解器中实现可由单按钮切换的独立是非判断模式，每轮只调用一次 XZKB 混合判断应用，并用舵机完成思考、反向蓄势和结果保持动作。
 
-**Architecture:** 保留现有对话控制器和知识补充工作流，把是非判断实现为独立的 `VerdictWorkflow`，由 `DeviceButtonWorkflow` 在三种模式间编排。混合应用客户端只负责一次请求和严格解析；舵机控制器只消费本地动作命令，不理解模型文本。设备状态集中发布模式、判断阶段、依据与耗时，网页多人会话与实体流程隔离。
+**Architecture:** 保留现有对话控制器和知识补充工作流，把是非判断实现为独立的 `VerdictWorkflow`，由统一三模式状态机编排。混合应用客户端只负责一次请求和严格解析；工作流输出抽象动作事件，网页会话使用动画适配器，实体设备使用 GPIO 舵机适配器。两者共用业务流程但拥有独立状态和轮次，网页默认不访问 GPIO。
 
 **Tech Stack:** Python 3.13、FastAPI、Pydantic、httpx、asyncio、gpiozero、pytest、原生 JavaScript/HTML/CSS。
 
@@ -15,7 +15,8 @@
 - `src/showroom_guide/verdict.py`：判断枚举、结构化结果、组合校验和服务降级。
 - `src/showroom_guide/clients/verdict.py`：XZKB 混合判断应用的一次性 HTTP 调用与响应解析。
 - `src/showroom_guide/verdict_workflow.py`：是非模式单轮 ASR 后的判断编排、轮次失效和提示选择。
-- `src/showroom_guide/servo_motion.py`：思考循环、反向蓄势、快速判断、结果保持和故障熔断。
+- `src/showroom_guide/verdict_motion.py`：统一动作事件、输出协议与网页状态输出适配器。
+- `src/showroom_guide/servo_motion.py`：实体舵机输出适配器、思考循环、反向蓄势、结果保持和故障熔断。
 - `src/showroom_guide/button_workflow.py`：单按钮三模式状态机和知识补充控制权兼容。
 - `src/showroom_guide/models.py`、`state.py`：设备可观察状态。
 - `src/showroom_guide/local_device.py`、`device.py`：复用录音/ASR，但按当前模式分派到对话或判断工作流。
@@ -172,10 +173,12 @@ git add .env.example src/showroom_guide/clients/verdict.py src/showroom_guide/co
 git commit -m "feat: 接入混合是非判断应用"
 ```
 
-### Task 3：实现舵机动作控制器
+### Task 3：建立统一动作协议并实现舵机适配器
 
 **Files:**
+- Create: `src/showroom_guide/verdict_motion.py`
 - Modify: `src/showroom_guide/servo_motion.py`
+- Test: `tests/unit/test_verdict_motion.py`
 - Test: `tests/unit/test_servo_motion.py`
 
 - [ ] **Step 1: 写失败测试覆盖思考、蓄势、快速判断和保持**
@@ -184,16 +187,16 @@ git commit -m "feat: 接入混合是非判断应用"
 @pytest.mark.asyncio
 async def test_yes_moves_to_no_side_then_immediately_to_yes_and_holds():
     driver = FakeServoDriver()
-    motion = ServoVerdictController(driver, yes_angle=20, neutral_angle=75, no_angle=130)
-    await motion.start_thinking()
-    await motion.show(Verdict.YES)
+    motion = ServoMotionOutput(driver, yes_angle=20, neutral_angle=75, no_angle=130)
+    await motion.thinking(generation=1)
+    await motion.show_verdict(Verdict.YES, generation=1)
     assert driver.last_two_angles == [130, 20]
     assert driver.disable_calls == 1
     assert driver.current_angle == 20
 
 @pytest.mark.asyncio
 async def test_recording_keeps_previous_result_without_motion():
-    await motion.show(Verdict.NO)
+    await motion.show_verdict(Verdict.NO, generation=1)
     before = list(driver.angles)
     await motion.prepare_recording()
     assert driver.angles == before
@@ -203,34 +206,41 @@ async def test_recording_keeps_previous_result_without_motion():
 
 - [ ] **Step 2: 运行舵机测试确认失败**
 
-Run: `python -m pytest -q -o filterwarnings= tests/unit/test_servo_motion.py`
+Run: `python -m pytest -q -o filterwarnings= tests/unit/test_verdict_motion.py tests/unit/test_servo_motion.py`
 
 Expected: FAIL，旧实现只有固定位置并且录音前回中。
 
 - [ ] **Step 3: 实现命令式动作 API**
 
 ```python
-class ServoVerdictController:
+class VerdictMotionOutput(Protocol):
+    async def thinking(self, generation: int) -> None: ...
+    async def show_verdict(self, verdict: Verdict, generation: int) -> None: ...
+    async def show_neutral(self, generation: int) -> None: ...
+    async def reset(self) -> None: ...
+
+class ServoMotionOutput:
     async def enter_mode(self) -> None: ...
     async def prepare_recording(self) -> None: ...  # 只取消运动，不改变角度
-    async def start_thinking(self) -> None: ...
-    async def show(self, verdict: Verdict) -> None: ...
+    async def thinking(self, generation: int) -> None: ...
+    async def show_verdict(self, verdict: Verdict, generation: int) -> None: ...
+    async def show_neutral(self, generation: int) -> None: ...
     async def leave_mode(self) -> None: ...
 ```
 
-`show(YES)` 的角度序列固定为 `no_angle -> yes_angle`，`show(NO)` 固定为 `yes_angle -> no_angle`，两次写角度之间不调用 sleep。最终到位只等待稳定时间再 `disable()`，不写回中央。思考循环只使用安全范围内的小角度并由任务取消终止。
+同时实现 `WebSimulationOutput`，它只把动作事件写入传入的网页会话状态，绝不导入 gpiozero。`show_verdict(YES)` 的实体角度序列固定为 `no_angle -> yes_angle`，`show_verdict(NO)` 固定为 `yes_angle -> no_angle`，两次写角度之间不调用 sleep。最终到位只等待稳定时间再 `disable()`，不写回中央。
 
 - [ ] **Step 4: 运行舵机测试确认通过**
 
-Run: `python -m pytest -q -o filterwarnings= tests/unit/test_servo_motion.py`
+Run: `python -m pytest -q -o filterwarnings= tests/unit/test_verdict_motion.py tests/unit/test_servo_motion.py`
 
 Expected: PASS。
 
 - [ ] **Step 5: 提交动作控制器**
 
 ```powershell
-git add src/showroom_guide/servo_motion.py tests/unit/test_servo_motion.py
-git commit -m "feat: 实现舵机判断动作语言"
+git add src/showroom_guide/verdict_motion.py src/showroom_guide/servo_motion.py tests/unit/test_verdict_motion.py tests/unit/test_servo_motion.py
+git commit -m "feat: 建立判断动作输出协议"
 ```
 
 ### Task 4：实现独立判断工作流
@@ -247,7 +257,7 @@ async def test_run_starts_thinking_calls_application_once_and_holds_yes():
     result = VerdictDecision.exhibition_yes("有知识依据", "知识片段")
     workflow = make_workflow(decision=result)
     await workflow.run("该产品支持国产算力吗？")
-    assert workflow.motion.calls == ["start_thinking", ("show", Verdict.YES)]
+    assert workflow.motion.calls == [("thinking", 1), ("show_verdict", Verdict.YES, 1)]
     assert workflow.client.questions == ["该产品支持国产算力吗？"]
     assert workflow.state.snapshot.verdict_phase is VerdictPhase.HOLDING
 ```
@@ -266,7 +276,7 @@ Expected: FAIL，模块不存在。
 async def run(self, transcript: str) -> VerdictDecision:
     generation = self._next_generation()
     await self._state.begin_verdict(transcript)
-    await self._motion.start_thinking()
+    await self._motion.thinking(generation)
     try:
         async with asyncio.timeout(self._timeout_seconds):
             decision = await self._client.decide(transcript)
@@ -274,7 +284,10 @@ async def run(self, transcript: str) -> VerdictDecision:
         decision = VerdictDecision.service_failure()
     if generation != self._generation:
         raise asyncio.CancelledError
-    await self._motion.show(decision.verdict)
+    if decision.verdict is Verdict.NEUTRAL:
+        await self._motion.show_neutral(generation)
+    else:
+        await self._motion.show_verdict(decision.verdict, generation)
     await self._state.finish_verdict(decision)
     await self._play_neutral_prompt_if_needed(decision)
     return decision
@@ -419,10 +432,12 @@ git commit -m "refactor: 隔离讲解与是非判断流程"
 - [ ] **Step 1: 写失败测试覆盖启停和设备隔离**
 
 ```python
-def test_runtime_injects_verdict_only_into_physical_device():
+def test_runtime_uses_separate_motion_outputs_for_web_and_physical_device():
     runtime = create_runtime(make_settings(verdict_enabled=True))
-    assert runtime.device.verdict_workflow is runtime.verdict_workflow
-    assert runtime.web_session_factory().controller._verdict_service is None
+    web_session = runtime.web_session_factory()
+    assert isinstance(runtime.device.verdict_workflow.motion, ServoMotionOutput)
+    assert isinstance(web_session.verdict_workflow.motion, WebSimulationOutput)
+    assert web_session.state is not runtime.device.state
 
 def test_device_state_exposes_mode_and_verdict_details(client, device_key):
     payload = client.get("/api/device/state", headers=device_key).json()
@@ -440,7 +455,7 @@ Expected: FAIL，运行时仍把旧 `VerdictService` 注入讲解控制器。
 
 - [ ] **Step 3: 完成依赖装配**
 
-创建一个物理设备专用 `VerdictWorkflow`，把 `VerdictClient`、状态、提示播放器和 `ServoVerdictController` 注入其中。应用关闭顺序先取消判断任务，再让舵机回中，最后关闭 HTTP 客户端。设备状态响应复用 Pydantic 快照，不手工拼接遗漏字段。
+创建物理设备专用 `VerdictWorkflow` 并注入 `ServoMotionOutput`；为每个设备测试网页会话创建独立 `VerdictWorkflow` 并注入 `WebSimulationOutput`。两者可以复用线程安全的 `VerdictClient`，但不得共享状态、模式或轮次。应用关闭顺序先取消判断任务，再让实体舵机回中，最后关闭 HTTP 客户端。
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -455,7 +470,7 @@ git add src/showroom_guide/main.py src/showroom_guide/models.py tests/unit/test_
 git commit -m "feat: 装配物理设备判断模式"
 ```
 
-### Task 8：更新设备测试页和舵机模拟器
+### Task 8：在网页对话区加入三模式测试和动画适配
 
 **Files:**
 - Modify: `src/showroom_guide/web/device-test.html`
@@ -477,7 +492,7 @@ test("yes result winds up right, snaps left, and stays left", async () => {
 });
 ```
 
-集成测试断言页面显示 `interaction_mode`、`scope`、`basis`、`reason`、`evidence`、动作阶段和耗时；没有设备控制权时不发送实体动作请求。
+集成测试断言页面提供同级“对话 / 是非判断 / 知识补充”切换，并显示 `interaction_mode`、`scope`、`basis`、`reason`、`evidence`、动作阶段和耗时。网页是非请求必须调用会话级工作流，运行时不得创建或调用实体舵机适配器。
 
 - [ ] **Step 2: 运行 JS 和页面测试确认失败**
 
@@ -489,7 +504,7 @@ Expected: FAIL，当前模拟器只有固定三态，没有模式切换和思考
 
 - [ ] **Step 3: 实现测试页**
 
-前端使用服务端状态作为唯一实体状态来源。测试按钮复用后端短按/长按端点；纯模拟预览仅修改浏览器中的机械动画。动作类名固定为 `thinking/windup/decisive/holding/neutral/failed`，并支持 `prefers-reduced-motion`。
+前端使用当前网页会话状态作为唯一来源。切到是非判断后，浏览器录音和 WAV 上传调用真实 ASR 与混合判断应用，请求期间显示思考动画，结果返回后播放蓄势、快速判断和保持动画。独立动作预览只修改浏览器动画，不调用 ASR、AI 或实体 API。动作类名固定为 `thinking/windup/decisive/holding/neutral/failed`，并支持 `prefers-reduced-motion`。
 
 - [ ] **Step 4: 运行前端测试确认通过**
 
