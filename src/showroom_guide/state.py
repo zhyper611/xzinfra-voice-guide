@@ -175,6 +175,22 @@ class GuideStateStore:
             message="判断完成",
         )
 
+    async def set_verdict_motion(self, event: object) -> GuideSnapshot:
+        phase = getattr(event, "phase", None)
+        verdict = getattr(event, "verdict", None)
+        generation = getattr(event, "generation", None)
+        if not isinstance(phase, VerdictPhase):
+            raise TypeError("motion event requires a verdict phase")
+        if not isinstance(verdict, Verdict):
+            raise TypeError("motion event requires a verdict")
+        if not isinstance(generation, int) or generation < 0:
+            raise TypeError("motion event requires a generation")
+        return await self._update(
+            verdict_phase=phase,
+            verdict=verdict,
+            verdict_generation=generation,
+        )
+
     async def reset(self) -> GuideSnapshot:
         async with self._lock:
             self._snapshot = GuideSnapshot()

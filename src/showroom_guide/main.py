@@ -30,6 +30,7 @@ from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.button_workflow import DeviceButtonWorkflow
 from showroom_guide.clients.speech import SpeechClient
 from showroom_guide.clients.xzkb import XzkbClient
+from showroom_guide.clients.verdict import VerdictClient
 from showroom_guide.clients.xzkb_auth import XzkbLocalAccountAuth
 from showroom_guide.clients.xzkb_knowledge import XzkbKnowledgeClient
 from showroom_guide.concurrency import AsyncGate
@@ -92,7 +93,12 @@ from showroom_guide.sessions import (
     SessionCapacityReached,
     SessionManager,
 )
+from showroom_guide.servo_motion import (
+    GpioZeroServoDriver,
+    ServoMotionOutput,
+)
 from showroom_guide.state import GuideStateStore
+from showroom_guide.verdict import VerdictService
 
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -198,6 +204,9 @@ class Runtime:
     knowledge_sync: KnowledgeSyncService | None = None
     button_workflow: DeviceButtonWorkflow | None = None
     gpio_button: GpioButtonService | None = None
+    servo_motion: ServoMotionOutput | None = None
+    verdict_client: VerdictClient | None = None
+    verdict_service: VerdictService | None = None
     cleanup_task: asyncio.Task[None] | None = None
 
     async def aclose(self) -> None:
@@ -236,6 +245,10 @@ class Runtime:
 
         if self.gpio_button is not None:
             await attempt(self.gpio_button.aclose())
+        if self.servo_motion is not None:
+            await attempt(self.servo_motion.aclose())
+        if self.verdict_client is not None:
+            await attempt(self.verdict_client.aclose())
         await attempt(self.knowledge_web.aclose())
         if self.knowledge_mode is not None:
             await attempt(self.knowledge_mode.aclose())
@@ -345,10 +358,59 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         audio_ttl_seconds=configured.audio_ttl_seconds,
         audio_items_per_session=configured.audio_items_per_session,
     )
+    verdict_client = None
+    verdict_service = None
+    if configured.verdict_enabled:
+        assert configured.verdict_base_url is not None
+        assert configured.verdict_api_key is not None
+        assert configured.verdict_model is not None
+        verdict_client = VerdictClient(
+            configured.verdict_base_url,
+            configured.verdict_api_key.get_secret_value(),
+            configured.verdict_model,
+            configured.verdict_timeout_seconds,
+        )
+        verdict_service = VerdictService(
+            verdict_client,
+            configured.xzkb_empty_search_response,
+        )
     device_state = GuideStateStore()
+    servo_motion = None
+    if configured.servo_enabled:
+        try:
+            servo_driver = GpioZeroServoDriver(
+                pin=configured.servo_pin,
+                min_angle=configured.servo_min_angle,
+                max_angle=configured.servo_max_angle,
+                min_pulse_width=(
+                    configured.servo_min_pulse_width_seconds
+                ),
+                max_pulse_width=(
+                    configured.servo_max_pulse_width_seconds
+                ),
+            )
+            servo_motion = ServoMotionOutput(
+                servo_driver,
+                yes_angle=configured.servo_yes_angle,
+                neutral_angle=configured.servo_neutral_angle,
+                no_angle=configured.servo_no_angle,
+            )
+        except Exception:
+            logger.exception("servo_initialization_failed")
     device = DeviceVoiceSession(
         state=device_state,
-        controller=controller_factory(device_state),
+        controller=GuideController(
+            device_state,
+            xzkb,
+            speech,
+            xzkb_gate=xzkb_gate,
+            tts_gate=tts_gate,
+            faq_cache=faq_cache,
+            prepared_audio=prepared_audio,
+            playback_timeout_seconds=configured.playback_timeout_seconds,
+            xzkb_total_timeout_seconds=configured.xzkb_total_timeout_seconds,
+            verdict_service=verdict_service,
+        ),
         speech=speech,
         audio=AudioStore(
             max_items=configured.audio_items_per_session,
@@ -372,6 +434,11 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         max_recording_seconds=configured.local_recording_max_seconds,
         min_recording_seconds=configured.local_recording_min_seconds,
         min_recording_dbfs=configured.local_recording_min_dbfs,
+        before_recording=(
+            servo_motion.prepare_recording
+            if servo_motion is not None
+            else None
+        ),
     )
     knowledge_mode = None
     knowledge_outbox = None
@@ -414,6 +481,11 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             max_recording_seconds=configured.local_recording_max_seconds,
             min_recording_seconds=configured.local_recording_min_seconds,
             min_recording_dbfs=configured.local_recording_min_dbfs,
+            before_recording=(
+                servo_motion.prepare_recording
+                if servo_motion is not None
+                else None
+            ),
         )
     button_workflow = None
     if configured.gpio_button_enabled or knowledge_mode is not None:
@@ -450,6 +522,9 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         knowledge_sync=knowledge_sync,
         button_workflow=button_workflow,
         gpio_button=gpio_button,
+        servo_motion=servo_motion,
+        verdict_client=verdict_client,
+        verdict_service=verdict_service,
     )
 
 
@@ -488,10 +563,13 @@ def create_app(runtime: Runtime) -> FastAPI:
         runtime.cleanup_task = cleanup_task
         knowledge_sync = getattr(runtime, "knowledge_sync", None)
         gpio_button = getattr(runtime, "gpio_button", None)
+        servo_motion = getattr(runtime, "servo_motion", None)
         if knowledge_sync is not None:
             knowledge_sync.start()
         if gpio_button is not None:
             gpio_button.start()
+        if servo_motion is not None:
+            await servo_motion.enter_mode()
         try:
             yield
         finally:

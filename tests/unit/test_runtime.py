@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -11,7 +11,7 @@ from showroom_guide import main as main_module
 from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.config import Settings
 from showroom_guide.knowledge_web import KnowledgeWebError
-from showroom_guide.main import Runtime, create_runtime
+from showroom_guide.main import Runtime, create_app, create_runtime
 from showroom_guide.main import cleanup_sessions
 
 
@@ -89,7 +89,83 @@ def make_close_test_runtime(events, **probes) -> Runtime:
             "gpio_button",
             make_close_probe("gpio_button", events),
         ),
+        servo_motion=probes.get("servo_motion"),
     )
+
+
+@pytest.mark.asyncio
+async def test_disabled_servo_does_not_construct_gpio(monkeypatch):
+    constructor = MagicMock()
+    monkeypatch.setattr(main_module, "GpioZeroServoDriver", constructor, raising=False)
+
+    runtime = create_runtime(make_settings(servo_enabled=False))
+
+    assert runtime.servo_motion is None
+    constructor.assert_not_called()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_enabled_servo_is_injected_into_device_workflows(monkeypatch):
+    driver = MagicMock()
+    constructor = MagicMock(return_value=driver)
+    monkeypatch.setattr(main_module, "GpioZeroServoDriver", constructor, raising=False)
+
+    runtime = create_runtime(
+        make_settings(servo_enabled=True, gpio_button_enabled=True)
+    )
+
+    constructor.assert_called_once_with(
+        pin=18,
+        min_angle=10.0,
+        max_angle=140.0,
+        min_pulse_width=0.0005,
+        max_pulse_width=0.0025,
+    )
+    assert runtime.servo_motion is not None
+    assert runtime.local_device._before_recording.__self__ is runtime.servo_motion
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_servo_initialization_failure_does_not_abort_runtime(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "GpioZeroServoDriver",
+        MagicMock(side_effect=OSError("GPIO unavailable")),
+        raising=False,
+    )
+
+    runtime = create_runtime(make_settings(servo_enabled=True))
+
+    assert runtime.servo_motion is None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_and_closes_servo_once():
+    runtime = create_runtime(make_settings())
+    servo = SimpleNamespace(enter_mode=AsyncMock(), aclose=AsyncMock())
+    runtime.servo_motion = servo
+    app = create_app(runtime)
+
+    async with app.router.lifespan_context(app):
+        servo.enter_mode.assert_awaited_once_with()
+
+    servo.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_servo_after_gpio_before_other_resources():
+    events = []
+    runtime = make_close_test_runtime(
+        events,
+        servo_motion=make_close_probe("servo_motion", events),
+    )
+
+    await runtime.aclose()
+
+    assert events[:3] == ["gpio_button", "servo_motion", "knowledge_web"]
 
 
 @pytest.mark.asyncio
