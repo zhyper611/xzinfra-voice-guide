@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -19,6 +20,12 @@ from showroom_guide.state import GuideStateStore
 async def async_events(*texts: str):
     for text in texts:
         yield ChatStreamEvent(text=text)
+
+
+def test_controller_has_no_verdict_dependency():
+    parameters = inspect.signature(GuideController).parameters
+
+    assert "verdict_service" not in parameters
 
 
 def make_controller(

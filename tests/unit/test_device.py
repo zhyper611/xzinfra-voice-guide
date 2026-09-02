@@ -20,7 +20,7 @@ from showroom_guide.device import (
     inspect_wav,
     validate_wav,
 )
-from showroom_guide.models import GuidePhase
+from showroom_guide.models import GuidePhase, InteractionMode
 from showroom_guide.state import GuideStateStore
 
 
@@ -88,7 +88,7 @@ class TrackingStateStore(GuideStateStore):
         return snapshot
 
 
-def make_session(speech=None, state=None):
+def make_session(speech=None, state=None, verdict_workflow=None):
     state = state or GuideStateStore()
     xzkb = TrackingXzkb()
     speech = speech or TrackingSpeech()
@@ -98,8 +98,31 @@ def make_session(speech=None, state=None):
         controller=controller,
         speech=speech,
         audio=AudioStore(),
+        verdict_workflow=verdict_workflow,
     )
     return session, state, xzkb, speech
+
+
+@pytest.mark.asyncio
+async def test_verdict_mode_uses_asr_without_dialogue_or_tts():
+    state = GuideStateStore()
+    await state.set_interaction_mode(InteractionMode.VERDICT)
+    speech = TrackingSpeech(["这是国产芯片吗？"])
+    verdict_workflow = AsyncMock()
+    session, _, xzkb, _ = make_session(
+        speech=speech,
+        state=state,
+        verdict_workflow=verdict_workflow,
+    )
+
+    result = await session.process_wav(make_wav())
+
+    verdict_workflow.run.assert_awaited_once_with("这是国产芯片吗？")
+    assert xzkb.messages == []
+    assert speech.synthesized_text == []
+    assert result.transcript == "这是国产芯片吗？"
+    assert result.answer == ""
+    assert result.audio_id is None
 
 
 @pytest.mark.parametrize(

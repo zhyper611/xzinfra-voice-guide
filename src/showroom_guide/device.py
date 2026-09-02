@@ -11,7 +11,7 @@ import httpx
 from showroom_guide.audio_store import AudioStore
 from showroom_guide.controller import GuideController, QuestionInProgress
 from showroom_guide.latency import DeviceLatencyRecorder
-from showroom_guide.models import GuidePhase, GuideSnapshot
+from showroom_guide.models import GuidePhase, GuideSnapshot, InteractionMode
 from showroom_guide.state import GuideStateStore
 
 
@@ -102,6 +102,7 @@ class DeviceVoiceSession:
         controller,
         speech,
         audio,
+        verdict_workflow=None,
         metrics: DeviceLatencyRecorder | None = None,
         clock=time.perf_counter,
     ) -> None:
@@ -109,6 +110,7 @@ class DeviceVoiceSession:
         self._controller: GuideController = controller
         self._speech = speech
         self._audio: AudioStore = audio
+        self._verdict_workflow = verdict_workflow
         self._metrics = metrics or DeviceLatencyRecorder()
         self._clock = clock
         self._turn_lock = asyncio.Lock()
@@ -193,6 +195,15 @@ class DeviceVoiceSession:
             finally:
                 timing.finish_asr()
             await self._state.set_transcript(transcript)
+            if self._state.snapshot.interaction_mode is InteractionMode.VERDICT:
+                if self._verdict_workflow is None:
+                    raise RuntimeError("是非判断模式未配置")
+                await self._verdict_workflow.run(transcript)
+                return DeviceTurnResult(
+                    transcript=transcript,
+                    answer="",
+                    audio_id=None,
+                )
             result = await self._controller.ask_text(transcript, timing=timing)
             audio_id = self._audio.put(result.audio) if result.audio is not None else None
             return DeviceTurnResult(
