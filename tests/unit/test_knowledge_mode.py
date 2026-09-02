@@ -81,7 +81,12 @@ class FakeKnowledgeCapture:
         self._draft = None
 
 
-def make_workflow(captured=None, *, max_recording_seconds=60.0):
+def make_workflow(
+    captured=None,
+    *,
+    max_recording_seconds=60.0,
+    before_recording=None,
+):
     audio = MagicMock()
     audio.start_recording = AsyncMock()
     audio.stop_recording = AsyncMock(return_value=captured or make_wav())
@@ -96,8 +101,41 @@ def make_workflow(captured=None, *, max_recording_seconds=60.0):
         audio,
         capture,
         max_recording_seconds=max_recording_seconds,
+        before_recording=before_recording,
     )
     return workflow, audio, capture
+
+
+@pytest.mark.asyncio
+async def test_before_recording_runs_before_knowledge_cue_and_microphone():
+    events = []
+    before_recording = AsyncMock(
+        side_effect=lambda: events.append("servo-quiet")
+    )
+    workflow, audio, _ = make_workflow(before_recording=before_recording)
+    audio.play_start_cue.side_effect = lambda: events.append("start-cue")
+    audio.start_recording.side_effect = lambda: events.append("audio-start")
+    await workflow.enter()
+
+    await workflow.short_press()
+
+    assert events == ["servo-quiet", "start-cue", "audio-start"]
+    await workflow.aclose()
+
+
+@pytest.mark.asyncio
+async def test_before_recording_failure_restores_knowledge_ready_state():
+    workflow, audio, _ = make_workflow(
+        before_recording=AsyncMock(side_effect=OSError("servo failed"))
+    )
+    await workflow.enter()
+
+    with pytest.raises(OSError, match="servo failed"):
+        await workflow.short_press()
+
+    assert workflow.state is KnowledgeModeState.READY
+    audio.play_start_cue.assert_not_awaited()
+    audio.start_recording.assert_not_awaited()
 
 
 @pytest.mark.asyncio

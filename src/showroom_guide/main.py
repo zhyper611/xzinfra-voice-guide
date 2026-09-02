@@ -98,7 +98,8 @@ from showroom_guide.servo_motion import (
     ServoMotionOutput,
 )
 from showroom_guide.state import GuideStateStore
-from showroom_guide.verdict import VerdictService
+from showroom_guide.verdict_motion import WebSimulationOutput
+from showroom_guide.verdict_workflow import VerdictWorkflow
 
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -206,7 +207,7 @@ class Runtime:
     gpio_button: GpioButtonService | None = None
     servo_motion: ServoMotionOutput | None = None
     verdict_client: VerdictClient | None = None
-    verdict_service: VerdictService | None = None
+    verdict_workflow: VerdictWorkflow | None = None
     cleanup_task: asyncio.Task[None] | None = None
 
     async def aclose(self) -> None:
@@ -245,6 +246,8 @@ class Runtime:
 
         if self.gpio_button is not None:
             await attempt(self.gpio_button.aclose())
+        if self.verdict_workflow is not None:
+            await attempt(self.verdict_workflow.leave())
         if self.servo_motion is not None:
             await attempt(self.servo_motion.aclose())
         if self.verdict_client is not None:
@@ -351,29 +354,35 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             xzkb_total_timeout_seconds=configured.xzkb_total_timeout_seconds,
         )
 
+    verdict_client = None
+    if configured.verdict_enabled:
+        assert configured.verdict_base_url is not None
+        assert configured.verdict_api_key is not None
+        verdict_client = VerdictClient(
+            configured.verdict_base_url,
+            configured.verdict_api_key.get_secret_value(),
+            configured.verdict_timeout_seconds,
+        )
+
+    def web_verdict_factory(state: GuideStateStore) -> VerdictWorkflow:
+        assert verdict_client is not None
+        return VerdictWorkflow(
+            verdict_client,
+            WebSimulationOutput(state),
+            state,
+            timeout_seconds=configured.verdict_timeout_seconds,
+        )
+
     sessions = SessionManager(
         controller_factory=controller_factory,
         max_sessions=configured.max_active_sessions,
         idle_seconds=configured.session_idle_seconds,
         audio_ttl_seconds=configured.audio_ttl_seconds,
         audio_items_per_session=configured.audio_items_per_session,
+        verdict_factory=(
+            web_verdict_factory if verdict_client is not None else None
+        ),
     )
-    verdict_client = None
-    verdict_service = None
-    if configured.verdict_enabled:
-        assert configured.verdict_base_url is not None
-        assert configured.verdict_api_key is not None
-        assert configured.verdict_model is not None
-        verdict_client = VerdictClient(
-            configured.verdict_base_url,
-            configured.verdict_api_key.get_secret_value(),
-            configured.verdict_model,
-            configured.verdict_timeout_seconds,
-        )
-        verdict_service = VerdictService(
-            verdict_client,
-            configured.xzkb_empty_search_response,
-        )
     device_state = GuideStateStore()
     servo_motion = None
     if configured.servo_enabled:
@@ -397,6 +406,26 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             )
         except Exception:
             logger.exception("servo_initialization_failed")
+    local_audio = LocalAudioController(
+        sample_rate=configured.sample_rate,
+        capture_device=configured.capture_device,
+        playback_device=configured.playback_device,
+        no_speech_prompt=NO_SPEECH_PROMPT_PATH.read_bytes(),
+        prompts={
+            name: path.read_bytes()
+            for name, path in LOCAL_PROMPT_PATHS.items()
+            if path.exists()
+        },
+    )
+    verdict_workflow = None
+    if verdict_client is not None:
+        verdict_workflow = VerdictWorkflow(
+            verdict_client,
+            servo_motion or WebSimulationOutput(device_state),
+            device_state,
+            play_prompt=local_audio.play_prompt,
+            timeout_seconds=configured.verdict_timeout_seconds,
+        )
     device = DeviceVoiceSession(
         state=device_state,
         controller=GuideController(
@@ -409,24 +438,13 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             prepared_audio=prepared_audio,
             playback_timeout_seconds=configured.playback_timeout_seconds,
             xzkb_total_timeout_seconds=configured.xzkb_total_timeout_seconds,
-            verdict_service=verdict_service,
         ),
         speech=speech,
         audio=AudioStore(
             max_items=configured.audio_items_per_session,
             ttl_seconds=configured.audio_ttl_seconds,
         ),
-    )
-    local_audio = LocalAudioController(
-        sample_rate=configured.sample_rate,
-        capture_device=configured.capture_device,
-        playback_device=configured.playback_device,
-        no_speech_prompt=NO_SPEECH_PROMPT_PATH.read_bytes(),
-        prompts={
-            name: path.read_bytes()
-            for name, path in LOCAL_PROMPT_PATHS.items()
-            if path.exists()
-        },
+        verdict_workflow=verdict_workflow,
     )
     local_device = LocalDeviceWorkflow(
         session=device,
@@ -488,8 +506,16 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
             ),
         )
     button_workflow = None
-    if configured.gpio_button_enabled or knowledge_mode is not None:
-        button_workflow = DeviceButtonWorkflow(local_device, knowledge_mode)
+    if (
+        configured.gpio_button_enabled
+        or knowledge_mode is not None
+        or verdict_workflow is not None
+    ):
+        button_workflow = DeviceButtonWorkflow(
+            local_device,
+            knowledge_mode,
+            verdict_workflow,
+        )
     gpio_button = None
     if configured.gpio_button_enabled:
         gpio_button = GpioButtonService(
@@ -524,7 +550,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         gpio_button=gpio_button,
         servo_motion=servo_motion,
         verdict_client=verdict_client,
-        verdict_service=verdict_service,
+        verdict_workflow=verdict_workflow,
     )
 
 

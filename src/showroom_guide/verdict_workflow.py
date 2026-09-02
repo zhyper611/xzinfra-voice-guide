@@ -4,7 +4,7 @@ import logging
 import time
 from collections.abc import Callable
 
-from showroom_guide.models import InteractionMode, VerdictPhase
+from showroom_guide.models import GuidePhase, InteractionMode, VerdictPhase
 from showroom_guide.state import GuideStateStore
 from showroom_guide.verdict import (
     Verdict,
@@ -103,6 +103,10 @@ class VerdictWorkflow:
                 generation=self._generation,
             )
         )
+        await self._state.set_interaction_mode(InteractionMode.CONVERSATION)
+        if self._state.snapshot.phase is not GuidePhase.IDLE:
+            await self._state.transition(GuidePhase.IDLE)
+        await self._state.set_message("输入问题开始讲解")
 
     async def _play_failure_prompt(
         self,

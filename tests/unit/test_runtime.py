@@ -13,6 +13,7 @@ from showroom_guide.config import Settings
 from showroom_guide.knowledge_web import KnowledgeWebError
 from showroom_guide.main import Runtime, create_app, create_runtime
 from showroom_guide.main import cleanup_sessions
+from showroom_guide.verdict_motion import WebSimulationOutput
 
 
 def make_settings(**overrides) -> Settings:
@@ -102,6 +103,48 @@ async def test_disabled_servo_does_not_construct_gpio(monkeypatch):
 
     assert runtime.servo_motion is None
     constructor.assert_not_called()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_verdict_runtime_without_servo_uses_simulation_output():
+    runtime = create_runtime(
+        make_settings(
+            verdict_enabled=True,
+            verdict_base_url="http://verdict.test",
+            verdict_api_key="verdict-test-key",
+        )
+    )
+
+    assert runtime.verdict_workflow is runtime.device._verdict_workflow
+    assert isinstance(runtime.verdict_workflow.motion, WebSimulationOutput)
+    assert runtime.verdict_workflow.motion._state is runtime.device._state
+
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_web_verdict_sessions_are_isolated_from_device_and_each_other():
+    runtime = create_runtime(
+        make_settings(
+            verdict_enabled=True,
+            verdict_base_url="http://verdict.test",
+            verdict_api_key="verdict-test-key",
+        )
+    )
+
+    first, _ = await runtime.sessions.get_or_create(None)
+    second, _ = await runtime.sessions.get_or_create(None)
+
+    assert first.verdict_workflow is not None
+    assert second.verdict_workflow is not None
+    assert isinstance(first.verdict_workflow.motion, WebSimulationOutput)
+    assert isinstance(second.verdict_workflow.motion, WebSimulationOutput)
+    assert first.verdict_workflow.motion._state is first.state
+    assert second.verdict_workflow.motion._state is second.state
+    assert first.verdict_workflow is not second.verdict_workflow
+    assert first.verdict_workflow is not runtime.verdict_workflow
+
     await runtime.aclose()
 
 

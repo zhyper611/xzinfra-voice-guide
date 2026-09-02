@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from showroom_guide.models import VerdictPhase
+from showroom_guide.models import GuidePhase, InteractionMode, VerdictPhase
 from showroom_guide.state import GuideStateStore
 from showroom_guide.verdict import (
     Verdict,
@@ -162,3 +162,5 @@ async def test_leave_invalidates_late_result_and_resets_motion():
         await task
     assert motion.calls[-1] == ("reset",)
     assert state.snapshot.verdict_phase is VerdictPhase.IDLE
+    assert state.snapshot.interaction_mode is InteractionMode.CONVERSATION
+    assert state.snapshot.phase is GuidePhase.IDLE

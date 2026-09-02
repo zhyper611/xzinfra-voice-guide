@@ -96,6 +96,46 @@ async def let_background_tasks_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_before_recording_runs_before_cue_and_microphone():
+    events = []
+    session = FakeSession()
+    audio = FakeAudio()
+    before_recording = AsyncMock(
+        side_effect=lambda: events.append("servo-quiet")
+    )
+    audio.play_start_cue.side_effect = lambda: events.append("start-cue")
+    audio.start_recording.side_effect = lambda: events.append("audio-start")
+    workflow = LocalDeviceWorkflow(
+        session=session,
+        audio=audio,
+        before_recording=before_recording,
+    )
+
+    await workflow.start_recording()
+
+    assert events == ["servo-quiet", "start-cue", "audio-start"]
+    await workflow.aclose()
+
+
+@pytest.mark.asyncio
+async def test_before_recording_failure_does_not_open_microphone():
+    session = FakeSession()
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(
+        session=session,
+        audio=audio,
+        before_recording=AsyncMock(side_effect=OSError("servo failed")),
+    )
+
+    with pytest.raises(OSError, match="servo failed"):
+        await workflow.start_recording()
+
+    assert workflow.is_idle is True
+    audio.play_start_cue.assert_not_awaited()
+    audio.start_recording.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_start_stop_processes_and_plays_in_order():
     events = []
     session = FakeSession()

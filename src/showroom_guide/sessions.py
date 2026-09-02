@@ -21,6 +21,7 @@ class GuideSession:
     audio: AudioStore
     created_at: float
     last_active_at: float
+    verdict_workflow: object | None = None
     connected_clients: int = 0
 
     @property
@@ -36,6 +37,7 @@ class SessionManager:
         idle_seconds: float,
         audio_ttl_seconds: float,
         audio_items_per_session: int,
+        verdict_factory: Callable[[GuideStateStore], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._controller_factory = controller_factory
@@ -43,6 +45,7 @@ class SessionManager:
         self._idle_seconds = idle_seconds
         self._audio_ttl_seconds = audio_ttl_seconds
         self._audio_items_per_session = audio_items_per_session
+        self._verdict_factory = verdict_factory
         self._clock = clock
         self._sessions: dict[str, GuideSession] = {}
         self._lock = asyncio.Lock()
@@ -84,6 +87,11 @@ class SessionManager:
                 ),
                 created_at=now,
                 last_active_at=now,
+                verdict_workflow=(
+                    self._verdict_factory(state)
+                    if self._verdict_factory is not None
+                    else None
+                ),
             )
             self._sessions[new_id] = session
             return session, True
@@ -116,6 +124,8 @@ class SessionManager:
             ]
             for session_id in removed:
                 session = self._sessions.pop(session_id)
+                if session.verdict_workflow is not None:
+                    await session.verdict_workflow.leave()
                 session.audio.clear()
             for session in self._sessions.values():
                 session.audio.prune()
@@ -124,5 +134,7 @@ class SessionManager:
     async def clear(self) -> None:
         async with self._lock:
             for session in self._sessions.values():
+                if session.verdict_workflow is not None:
+                    await session.verdict_workflow.leave()
                 session.audio.clear()
             self._sessions.clear()
