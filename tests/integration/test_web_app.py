@@ -1,4 +1,6 @@
 import asyncio
+import io
+import wave
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +14,7 @@ from showroom_guide.controller import (
     TextQuestionResult,
 )
 from showroom_guide.main import create_app
+from showroom_guide.models import InteractionMode
 from showroom_guide.sessions import SessionManager
 
 
@@ -55,6 +58,48 @@ def establish_session(client, runtime):
     session = runtime.sessions.get(session_id)
     assert session is not None
     return session
+
+
+def make_wav() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\x01\x00" * 1600)
+    return output.getvalue()
+
+
+def test_web_verdict_turn_uses_isolated_session_workflow():
+    runtime = FakeRuntime()
+    workflows = []
+
+    def verdict_factory(state):
+        async def enter():
+            await state.set_interaction_mode(InteractionMode.VERDICT)
+
+        workflow = MagicMock()
+        workflow.enter = AsyncMock(side_effect=enter)
+        workflow.run = AsyncMock()
+        workflow.leave = AsyncMock()
+        workflows.append(workflow)
+        return workflow
+
+    runtime.sessions._verdict_factory = verdict_factory
+    runtime.speech = MagicMock()
+    runtime.speech.transcribe = AsyncMock(return_value="这是国产芯片吗？")
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/api/device/verdict/turn",
+            headers={"X-Device-Key": "device-test-key"},
+            files={"file": ("question.wav", make_wav(), "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert len(workflows) == 1
+    workflows[0].enter.assert_awaited_once_with()
+    workflows[0].run.assert_awaited_once_with("这是国产芯片吗？")
+    runtime.device.process_wav.assert_not_called()
 
 
 def test_index_serves_mobile_question_interface():
@@ -117,6 +162,15 @@ def test_device_page_uses_unified_button_and_advanced_wav():
         "wav-knowledge-discard",
         "wav-knowledge-retry",
         "wav-knowledge-save",
+        "mode-conversation",
+        "mode-verdict",
+        "mode-knowledge",
+        "verdict-context",
+        "verdict-scope",
+        "verdict-basis",
+        "verdict-reason",
+        "verdict-evidence",
+        "verdict-elapsed",
     ]
     for element_id in required_ids:
         assert f'id="{element_id}"' in html
@@ -130,7 +184,48 @@ def test_device_page_loads_press_gesture_before_page_script():
         html = client.get("/device-test").text
 
     assert html.index("press-gesture.js") < html.index("device-interaction.js")
-    assert html.index("device-interaction.js") < html.index("device-test.js")
+    assert html.index("device-interaction.js") < html.index("browser-recorder.js")
+    assert html.index("browser-recorder.js") < html.index("servo-simulator.js")
+    assert html.index("servo-simulator.js") < html.index("device-test.js")
+
+
+def test_device_page_exposes_servo_simulator_controls():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        html = client.get("/device-test").text
+        script = client.get("/static/servo-simulator.js")
+
+    required_ids = [
+        "servo-simulator",
+        "servo-mode-follow",
+        "servo-mode-preview",
+        "servo-arm",
+        "servo-verdict-output",
+        "servo-phase-output",
+    ]
+    for element_id in required_ids:
+        assert f'id="{element_id}"' in html
+    for verdict in ("yes", "neutral", "no"):
+        assert f'data-servo-verdict="{verdict}"' in html
+    assert "servo-speed" not in html
+    assert "servo-wake" not in html
+    assert 'aria-labelledby="servo-simulator-title"' in html
+    assert script.status_code == 200
+    assert "javascript" in script.headers["content-type"]
+
+
+def test_device_styles_define_stable_responsive_servo_stage():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        css = client.get("/static/device-test.css").text
+
+    assert ".servo-simulator" in css
+    assert ".servo-stage" in css
+    assert "aspect-ratio: 16 / 10" in css
+    assert ".servo-arm" in css
+    assert "transform-origin: 18px 50%" in css
+    assert "--servo-angle" in css
+    assert "@media (max-width: 760px)" in css
 
 
 def test_device_test_styles_are_branded_responsive_and_accessible():
@@ -261,6 +356,14 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert "new AbortController()" in response.text
     assert "REQUEST_TIMEOUT_MS" in response.text
     assert "请求超时，请检查网络后重试" in response.text
+    assert "ShowroomBrowserRecorder.create()" in response.text
+    assert "ShowroomServoSimulator.bind(servoSimulatorRoot)" in response.text
+    assert 'request("/api/device/verdict/turn"' in response.text
+    assert "servoSimulator.startThinking()" in response.text
+    assert "servoSimulator.applySessionState(snapshot)" in response.text
+    assert 'console.error("servo_simulator_initialization_failed"' in response.text
+    assert 'console.error("servo_simulator_update_failed"' in response.text
+    assert "servoSimulator?.destroy()" in response.text
 
 
 def test_device_test_page_exposes_knowledge_capture_controls():

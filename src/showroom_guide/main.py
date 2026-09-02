@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
@@ -47,6 +48,7 @@ from showroom_guide.device import (
     InvalidDeviceAudio,
     NO_SPEECH_MESSAGE,
     NoSpeechDetected,
+    validate_wav,
 )
 from showroom_guide.faq_cache import FaqCache, load_cache
 from showroom_guide.faq_audio import tts_profile_from_settings
@@ -86,7 +88,7 @@ from showroom_guide.local_device import (
     LastRecordingNotFound,
     LocalDeviceWorkflow,
 )
-from showroom_guide.models import GuideSnapshot
+from showroom_guide.models import GuideSnapshot, InteractionMode
 from showroom_guide.prepared_audio import PreparedAudioStore
 from showroom_guide.sessions import (
     GuideSession,
@@ -1162,6 +1164,46 @@ def create_app(runtime: Runtime) -> FastAPI:
             **runtime.device.snapshot.model_dump(),
             has_last_recording=runtime.local_device.has_last_recording,
         )
+
+    @app.post(
+        "/api/device/verdict/turn",
+        response_model=GuideSnapshot,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def process_web_verdict_turn(
+        request: Request,
+        response: Response,
+        file: UploadFile = File(...),
+    ) -> GuideSnapshot:
+        session = await establish_http_session(request, response)
+        workflow = session.verdict_workflow
+        if workflow is None:
+            raise HTTPException(status_code=404, detail="是非判断功能未启用")
+        try:
+            audio = await file.read(runtime.device_max_upload_bytes + 1)
+        finally:
+            await file.close()
+        if len(audio) > runtime.device_max_upload_bytes:
+            raise HTTPException(status_code=413, detail="录音文件过大")
+        try:
+            validate_wav(audio)
+            transcript = (
+                await runtime.speech.transcribe(io.BytesIO(audio))
+            ).strip()
+        except InvalidDeviceAudio as error:
+            raise HTTPException(status_code=415, detail=str(error)) from error
+        except (httpx.HTTPError, ValueError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="语音识别暂时不可用，请稍后重试",
+            ) from error
+        if not transcript:
+            raise HTTPException(status_code=422, detail=NO_SPEECH_MESSAGE)
+        if session.state.snapshot.interaction_mode is not InteractionMode.VERDICT:
+            await workflow.enter()
+        await workflow.run(transcript)
+        runtime.sessions.touch(session)
+        return session.state.snapshot
 
     @app.post(
         "/api/device/knowledge/acquire",

@@ -164,6 +164,7 @@ class GuideStateStore:
         if decision.scope is None:
             raise ValueError("mixed verdict decision requires a scope")
         return await self._update(
+            phase=GuidePhase.IDLE,
             verdict_phase=phase,
             verdict=decision.verdict,
             verdict_scope=decision.scope,

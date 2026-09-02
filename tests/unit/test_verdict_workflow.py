@@ -82,6 +82,7 @@ async def test_run_starts_thinking_calls_application_once_and_holds_yes():
     ]
     assert client.questions == ["该产品支持国产算力吗？"]
     assert state.snapshot.verdict_phase is VerdictPhase.HOLDING
+    assert state.snapshot.phase is GuidePhase.IDLE
     assert state.snapshot.verdict_evidence == "支持国产算力适配"
     assert state.snapshot.answer == ""
 
