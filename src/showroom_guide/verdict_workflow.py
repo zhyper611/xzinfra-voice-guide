@@ -4,7 +4,7 @@ import logging
 import time
 from collections.abc import Callable
 
-from showroom_guide.models import VerdictPhase
+from showroom_guide.models import InteractionMode, VerdictPhase
 from showroom_guide.state import GuideStateStore
 from showroom_guide.verdict import (
     Verdict,
@@ -51,6 +51,11 @@ class VerdictWorkflow:
     @property
     def motion(self) -> VerdictMotionOutput:
         return self._motion
+
+    async def enter(self) -> None:
+        self._generation += 1
+        await self._motion.reset()
+        await self._state.set_interaction_mode(InteractionMode.VERDICT)
 
     async def run(self, transcript: str) -> VerdictDecision:
         question = transcript.strip()

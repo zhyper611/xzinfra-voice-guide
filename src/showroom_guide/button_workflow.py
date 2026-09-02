@@ -9,13 +9,20 @@ from showroom_guide.knowledge_mode import (
 
 class ButtonInteractionMode(StrEnum):
     DIALOGUE = "dialogue"
+    VERDICT = "verdict"
     KNOWLEDGE = "knowledge"
 
 
 class DeviceButtonWorkflow:
-    def __init__(self, local_device, knowledge_workflow) -> None:
+    def __init__(
+        self,
+        local_device,
+        knowledge_workflow,
+        verdict_workflow=None,
+    ) -> None:
         self._local_device = local_device
         self._knowledge = knowledge_workflow
+        self._verdict = verdict_workflow
         self._mode = ButtonInteractionMode.DIALOGUE
         self._lock = asyncio.Lock()
         self._knowledge_owner = None
@@ -43,20 +50,51 @@ class DeviceButtonWorkflow:
                 if self._mode is ButtonInteractionMode.DIALOGUE:
                     if not self._local_device.is_idle:
                         return None
+                    if self._verdict is not None:
+                        await self._verdict.enter()
+                        await self._set_mode(ButtonInteractionMode.VERDICT)
+                        return None
                     if self._knowledge is None:
                         return None
-                    await self._knowledge.enter()
-                    self._mode = ButtonInteractionMode.KNOWLEDGE
+                    try:
+                        await self._knowledge.enter()
+                    except BaseException:
+                        try:
+                            await self._knowledge.cancel()
+                        finally:
+                            await self._set_mode(ButtonInteractionMode.DIALOGUE)
+                        raise
+                    await self._set_mode(ButtonInteractionMode.KNOWLEDGE)
+                    return None
+                if self._mode is ButtonInteractionMode.VERDICT:
+                    if not self._local_device.is_idle:
+                        return None
+                    await self._verdict.leave()
+                    if self._knowledge is None:
+                        await self._set_mode(ButtonInteractionMode.DIALOGUE)
+                        return None
+                    try:
+                        await self._knowledge.enter()
+                    except BaseException:
+                        try:
+                            await self._knowledge.cancel()
+                        finally:
+                            await self._set_mode(ButtonInteractionMode.DIALOGUE)
+                        raise
+                    await self._set_mode(ButtonInteractionMode.KNOWLEDGE)
                     return None
                 result = await self._knowledge.long_press()
                 if result.exited:
-                    self._mode = ButtonInteractionMode.DIALOGUE
+                    await self._set_mode(ButtonInteractionMode.DIALOGUE)
                 return result
             except asyncio.CancelledError:
                 try:
-                    await self._knowledge.cancel()
+                    if self._mode is ButtonInteractionMode.VERDICT:
+                        await self._verdict.leave()
+                    elif self._mode is ButtonInteractionMode.KNOWLEDGE:
+                        await self._knowledge.cancel()
                 finally:
-                    self._mode = ButtonInteractionMode.DIALOGUE
+                    await self._set_mode(ButtonInteractionMode.DIALOGUE)
                 raise
 
     async def acquire_knowledge_control(self, owner: object) -> bool:
@@ -76,16 +114,16 @@ class DeviceButtonWorkflow:
                     await self._knowledge.cancel()
                 finally:
                     if self._knowledge.state is KnowledgeModeState.INACTIVE:
-                        self._mode = ButtonInteractionMode.DIALOGUE
                         self._knowledge_owner = None
+                        await self._set_mode(ButtonInteractionMode.DIALOGUE)
                     else:
-                        self._mode = ButtonInteractionMode.KNOWLEDGE
                         self._knowledge_owner = owner
+                        await self._set_mode(ButtonInteractionMode.KNOWLEDGE)
                 raise
             if self._knowledge.state is KnowledgeModeState.INACTIVE:
                 return False
-            self._mode = ButtonInteractionMode.KNOWLEDGE
             self._knowledge_owner = owner
+            await self._set_mode(ButtonInteractionMode.KNOWLEDGE)
             return True
 
     async def knowledge_short_press(self, owner: object) -> None:
@@ -103,12 +141,12 @@ class DeviceButtonWorkflow:
                 result = await self._knowledge.long_press()
             except BaseException:
                 if self._knowledge.state is KnowledgeModeState.INACTIVE:
-                    self._mode = ButtonInteractionMode.DIALOGUE
                     self._knowledge_owner = None
+                    await self._set_mode(ButtonInteractionMode.DIALOGUE)
                 raise
             if result.exited:
-                self._mode = ButtonInteractionMode.DIALOGUE
                 self._knowledge_owner = None
+                await self._set_mode(ButtonInteractionMode.DIALOGUE)
             return result
 
     async def release_knowledge_control(self, owner: object) -> bool:
@@ -119,13 +157,13 @@ class DeviceButtonWorkflow:
                 await self._knowledge.cancel()
             except BaseException:
                 if self._knowledge.state is KnowledgeModeState.INACTIVE:
-                    self._mode = ButtonInteractionMode.DIALOGUE
                     self._knowledge_owner = None
+                    await self._set_mode(ButtonInteractionMode.DIALOGUE)
                 raise
             if self._knowledge.state is not KnowledgeModeState.INACTIVE:
                 return False
-            self._mode = ButtonInteractionMode.DIALOGUE
             self._knowledge_owner = None
+            await self._set_mode(ButtonInteractionMode.DIALOGUE)
             return True
 
     async def cancel_knowledge(self) -> None:
@@ -138,7 +176,7 @@ class DeviceButtonWorkflow:
             try:
                 await self._knowledge.cancel()
             finally:
-                self._mode = ButtonInteractionMode.DIALOGUE
+                await self._set_mode(ButtonInteractionMode.DIALOGUE)
 
     async def run_dialogue(self, operation):
         async with self._lock:
@@ -149,3 +187,6 @@ class DeviceButtonWorkflow:
     def _require_knowledge_owner(self, owner: object) -> None:
         if self._knowledge_owner is not owner:
             raise RuntimeError("知识补充控制权不匹配")
+
+    async def _set_mode(self, mode: ButtonInteractionMode) -> None:
+        self._mode = mode
