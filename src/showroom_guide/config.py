@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     sample_rate: int = Field(default=16000, gt=0)
     gpio_button_enabled: bool = False
     button_hold_seconds: float = Field(default=1.5, gt=0)
+    servo_enabled: bool = False
+    servo_pin: int = Field(default=18, ge=0, le=27)
+    servo_min_angle: float = Field(default=10.0, ge=0.0, lt=180.0)
+    servo_max_angle: float = Field(default=140.0, gt=0.0, le=180.0)
+    servo_yes_angle: float = 20.0
+    servo_neutral_angle: float = 75.0
+    servo_no_angle: float = 130.0
+    servo_min_pulse_width_seconds: float = Field(default=0.0005, gt=0.0)
+    servo_max_pulse_width_seconds: float = Field(default=0.0025, gt=0.0)
+    verdict_enabled: bool = False
+    verdict_base_url: str | None = None
+    verdict_api_key: SecretStr | None = None
+    verdict_timeout_seconds: float = Field(default=15.0, gt=0.0)
     knowledge_capture_enabled: bool = False
     xzkb_username: str | None = Field(default=None, min_length=1)
     xzkb_password: SecretStr | None = None
@@ -88,6 +101,14 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_base_url(cls, value: str) -> str:
         return value.rstrip("/")
+
+    @field_validator("verdict_base_url")
+    @classmethod
+    def normalize_optional_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().rstrip("/")
+        return normalized or None
 
     @field_validator("xzkb_empty_search_response")
     @classmethod
@@ -131,6 +152,51 @@ class Settings(BaseSettings):
     def validate_local_recording_limits(self) -> Self:
         if self.local_recording_min_seconds >= self.local_recording_max_seconds:
             raise ValueError("最短录音时长必须小于最长录音时长")
+        return self
+
+    @model_validator(mode="after")
+    def validate_servo_configuration(self) -> Self:
+        if self.servo_min_angle >= self.servo_max_angle:
+            raise ValueError("舵机最小角度必须小于最大角度")
+        if (
+            self.servo_min_pulse_width_seconds
+            >= self.servo_max_pulse_width_seconds
+        ):
+            raise ValueError("舵机最小脉宽必须小于最大脉宽")
+        if (
+            self.servo_enabled
+            and self.gpio_button_enabled
+            and self.servo_pin == self.ptt_pin
+        ):
+            raise ValueError("舵机 GPIO 不能与实体按钮 GPIO 相同")
+        positions = (
+            self.servo_yes_angle,
+            self.servo_neutral_angle,
+            self.servo_no_angle,
+        )
+        if any(
+            position < self.servo_min_angle
+            or position > self.servo_max_angle
+            for position in positions
+        ):
+            raise ValueError("舵机判断角度必须位于机械安全范围内")
+        if len(set(positions)) != 3:
+            raise ValueError("舵机的是、中立、否角度不能相同")
+        if not min(self.servo_yes_angle, self.servo_no_angle) < (
+            self.servo_neutral_angle
+        ) < max(self.servo_yes_angle, self.servo_no_angle):
+            raise ValueError("舵机中立角度必须位于是与否之间")
+        return self
+
+    @model_validator(mode="after")
+    def validate_verdict_credentials(self) -> Self:
+        key = self.verdict_api_key
+        if self.verdict_enabled and (
+            self.verdict_base_url is None
+            or key is None
+            or not key.get_secret_value().strip()
+        ):
+            raise ValueError("启用判断应用时必须配置完整的应用凭据")
         return self
 
     @model_validator(mode="after")
