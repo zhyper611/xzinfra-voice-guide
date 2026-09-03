@@ -73,10 +73,17 @@ class ServoMotionOutput:
             Verdict.NEUTRAL: neutral_angle,
             Verdict.NO: no_angle,
         }
-        self._thinking_angles = (
-            neutral_angle - thinking_offset,
-            neutral_angle + thinking_offset,
-        )
+        self._thinking_angles = (yes_angle, no_angle)
+
+        def toward(target: float) -> float:
+            distance = target - neutral_angle
+            bounded = min(abs(distance), thinking_offset)
+            return neutral_angle + (bounded if distance >= 0 else -bounded)
+
+        self._windup_angles = {
+            Verdict.YES: toward(no_angle),
+            Verdict.NO: toward(yes_angle),
+        }
         self._neutral_angles = (
             neutral_angle - thinking_offset * 0.75,
             neutral_angle + thinking_offset * 0.75,
@@ -131,8 +138,7 @@ class ServoMotionOutput:
             if not self._can_move or generation != self._generation:
                 return
             await self._cancel_thinking(disable=False)
-            opposite = Verdict.NO if verdict is Verdict.YES else Verdict.YES
-            if not self._set_angle_safely(self._angles[opposite]):
+            if not self._set_angle_safely(self._windup_angles[verdict]):
                 return
             await self._sleep(self._windup_travel_seconds)
             if not self._set_angle_safely(self._angles[verdict]):

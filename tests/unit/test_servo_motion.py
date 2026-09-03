@@ -85,6 +85,20 @@ async def test_enter_mode_centers_then_disables_servo():
 
 
 @pytest.mark.asyncio
+async def test_thinking_uses_full_yes_and_no_range():
+    from showroom_guide.servo_motion import ServoMotionOutput
+
+    driver = RecordingDriver()
+    output = ServoMotionOutput(driver, sleep=instant_sleep)
+
+    await output.thinking(generation=1)
+    await wait_for(lambda: len(driver.events) >= 2)
+
+    assert driver.events[:2] == [("angle", 20), ("angle", 130)]
+    await output.aclose()
+
+
+@pytest.mark.asyncio
 async def test_yes_allows_windup_travel_before_moving_to_yes_and_holding():
     from showroom_guide.servo_motion import ServoMotionOutput
 
@@ -104,7 +118,7 @@ async def test_yes_allows_windup_travel_before_moving_to_yes_and_holding():
     await output.show_verdict(Verdict.YES, generation=1)
 
     assert driver.events == [
-        ("angle", 130),
+        ("angle", 95),
         ("angle", 20),
         ("disable", None),
     ]
@@ -125,10 +139,45 @@ async def test_no_moves_to_yes_side_then_immediately_to_no_and_holds():
     await output.show_verdict(Verdict.NO, generation=2)
 
     assert driver.events == [
-        ("angle", 20),
+        ("angle", 55),
         ("angle", 130),
         ("disable", None),
     ]
+    await output.aclose()
+
+
+@pytest.mark.parametrize(
+    ("yes_angle", "neutral_angle", "no_angle", "verdict", "expected"),
+    [
+        (40, 50, 60, Verdict.YES, [("angle", 60), ("angle", 40)]),
+        (0, 100, 130, Verdict.NO, [("angle", 80), ("angle", 130)]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_windup_uses_offset_without_exceeding_custom_verdict_range(
+    yes_angle,
+    neutral_angle,
+    no_angle,
+    verdict,
+    expected,
+):
+    from showroom_guide.servo_motion import ServoMotionOutput
+
+    driver = RecordingDriver()
+    output = ServoMotionOutput(
+        driver,
+        yes_angle=yes_angle,
+        neutral_angle=neutral_angle,
+        no_angle=no_angle,
+        sleep=instant_sleep,
+    )
+    await output.thinking(generation=1)
+    await wait_for(lambda: len(driver.events) >= 2)
+    driver.events.clear()
+
+    await output.show_verdict(verdict, generation=1)
+
+    assert driver.events == [*expected, ("disable", None)]
     await output.aclose()
 
 
