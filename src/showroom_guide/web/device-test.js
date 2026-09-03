@@ -4,12 +4,17 @@ const toggleKey = document.querySelector("#toggle-key");
 const unifiedInteraction = document.querySelector(".unified-interaction");
 const interactionMode = document.querySelector("#interaction-mode");
 const interactionStage = document.querySelector("#interaction-stage");
+const deviceRoute = document.querySelector("#device-route");
 const unifiedAction = document.querySelector("#unified-action");
 const unifiedActionLabel = document.querySelector("#unified-action-label");
+const modeConversation = document.querySelector("#mode-conversation");
+const modeVerdict = document.querySelector("#mode-verdict");
+const modeKnowledge = document.querySelector("#mode-knowledge");
 const replayRecording = document.querySelector("#replay-recording");
 const replayRecordingLabel = document.querySelector("#replay-recording-label");
 const advancedWav = document.querySelector("#advanced-wav");
 const wavPurposeDialogue = document.querySelector("#wav-purpose-dialogue");
+const wavPurposeVerdict = document.querySelector("#wav-purpose-verdict");
 const wavPurposeKnowledge = document.querySelector("#wav-purpose-knowledge");
 const wavFile = document.querySelector("#wav-file");
 const dropZone = document.querySelector("#drop-zone");
@@ -30,7 +35,9 @@ const phase = document.querySelector("#phase");
 const statusMessage = document.querySelector("#status-message");
 const transcript = document.querySelector("#transcript");
 const answer = document.querySelector("#answer");
+const answerLabel = document.querySelector("#answer-label");
 const audio = document.querySelector("#device-audio");
+const audioLabel = document.querySelector("#audio-label");
 const audioHint = document.querySelector("#audio-hint");
 const latencyCurrentTab = document.querySelector("#latency-current-tab");
 const latencyStatsTab = document.querySelector("#latency-stats-tab");
@@ -52,6 +59,27 @@ const knowledgeDraft = document.querySelector("#knowledge-draft");
 const knowledgeSync = document.querySelector("#knowledge-sync");
 const knowledgeSyncState = document.querySelector("#knowledge-sync-state");
 const knowledgeContext = document.querySelector("#knowledge-context");
+const verdictContext = document.querySelector("#verdict-context");
+const verdictScope = document.querySelector("#verdict-scope");
+const verdictBasis = document.querySelector("#verdict-basis");
+const verdictReason = document.querySelector("#verdict-reason");
+const verdictEvidence = document.querySelector("#verdict-evidence");
+const verdictElapsed = document.querySelector("#verdict-elapsed");
+const servoSimulatorRoot = document.querySelector("#servo-simulator");
+let servoSimulator = null;
+let browserRecorder = null;
+
+try {
+  servoSimulator = ShowroomServoSimulator.bind(servoSimulatorRoot);
+} catch (error) {
+  console.error("servo_simulator_initialization_failed", error);
+}
+try {
+  browserRecorder = ShowroomBrowserRecorder.create();
+} catch (error) {
+  console.error("browser_recorder_initialization_failed", error);
+}
+const audioDeviceStatus = document.querySelector("#audio-device-status");
 
 const phaseLabels = {
   idle: "待机",
@@ -81,6 +109,7 @@ let metricsRequestGeneration = null;
 let metricsRequestId = 0;
 let operationPending = false;
 let currentPhase = "idle";
+let frontendMode = "conversation";
 let dialogueSource = "microphone";
 let wavPurpose = "dialogue";
 let localPlaybackActive = false;
@@ -105,6 +134,7 @@ let knowledgeReviewAudioPath = null;
 let knowledgeReviewPlayback = null;
 let unifiedGesture = null;
 let unifiedInput = null;
+let audioAvailability = { ready: false, message: "正在检测麦克风和扬声器" };
 
 const wavReviewGate = ShowroomDeviceInteraction.createWavReviewGate({
   revokeObjectUrl: (objectUrl) => URL.revokeObjectURL(objectUrl),
@@ -158,6 +188,18 @@ const knowledgeSyncLabels = {
   processing: "知识库处理中",
   retrying: "同步重试中",
   synced: "已同步",
+};
+
+const verdictScopeLabels = {
+  exhibition: "展厅知识",
+  casual: "日常判断",
+  invalid: "无法判断",
+};
+
+const verdictBasisLabels = {
+  knowledge_base: "知识库",
+  general: "通用能力",
+  none: "无依据",
 };
 
 const metricLabels = [
@@ -369,6 +411,43 @@ function clearError() {
   deviceError.textContent = "";
 }
 
+function setFrontendMode(mode) {
+  if (!["conversation", "verdict"].includes(mode)) return;
+  if ((knowledgeSnapshot?.mode_state || "inactive") !== "inactive") return;
+  frontendMode = mode;
+  clearError();
+  updateControls();
+}
+
+async function switchFrontendMode(mode) {
+  const knowledgeMode = knowledgeSnapshot?.mode_state || "inactive";
+  const ownsKnowledge = (
+    knowledgeSnapshot?.control_state === "owned"
+    && Boolean(knowledgeLeaseToken)
+  );
+  const action = ShowroomDeviceInteraction.resolveFrontendModeSwitch({
+    targetMode: mode,
+    knowledgeMode,
+    ownsKnowledge,
+  });
+  if (action === "direct") {
+    setFrontendMode(mode);
+    return;
+  }
+  if (action === "release") {
+    if (await releaseKnowledgeControl()) setFrontendMode(mode);
+    return;
+  }
+  const messages = {
+    recording: "请先短按停止录音，再处理当前知识草稿。",
+    processing: "知识补充正在处理，请稍候。",
+    confirming: "已有待确认知识，请先保存、重录或放弃。",
+  };
+  deviceError.textContent = ownsKnowledge
+    ? (messages[knowledgeMode] || "当前知识补充尚未结束。")
+    : "知识补充正被其他页面使用，暂时不能切换模式。";
+}
+
 function showKnowledgeError(error) {
   deviceError.textContent = error instanceof TypeError
     ? "无法连接展厅服务，请检查网络或服务状态"
@@ -416,6 +495,16 @@ function getUnifiedAction() {
     }
     return { short: knowledgeShort, long: knowledgeLong, label: "长按保存并返回" };
   }
+  if (frontendMode === "verdict") {
+    if (browserRecorder?.isRecording) {
+      return { short: runVerdictShortPress, long: null, label: "短按停止并判断" };
+    }
+    return {
+      short: runVerdictShortPress,
+      long: knowledgeSnapshot?.enabled === false ? null : acquireKnowledgeControl,
+      label: "短按开始是非判断",
+    };
+  }
   if (currentPhase === "recording") {
     return { short: runDialogueShortPress, long: null, label: "短按结束录音" };
   }
@@ -424,7 +513,7 @@ function getUnifiedAction() {
   }
   return {
     short: runDialogueShortPress,
-    long: knowledgeSnapshot?.enabled === false ? null : acquireKnowledgeControl,
+    long: () => setFrontendMode("verdict"),
     label: "短按开始对话",
   };
 }
@@ -433,19 +522,40 @@ function updateUnifiedAction() {
   const action = getUnifiedAction();
   const mode = knowledgeSnapshot?.mode_state || "inactive";
   const knowledgeActive = mode !== "inactive";
+  if (knowledgeActive) frontendMode = "knowledge";
+  else if (frontendMode === "knowledge") frontendMode = "conversation";
   const keyReady = Boolean(deviceKey.value.trim());
-  const disabled = !keyReady || (!action.short && !action.long);
+  const disabled = ShowroomDeviceInteraction.shouldDisableUnifiedAction({
+    keyReady,
+    hasShortAction: Boolean(action.short),
+    hasLongAction: Boolean(action.long),
+  });
 
   unifiedActionLabel.textContent = action.label;
   unifiedAction.dataset.state = knowledgeActive ? mode : currentPhase;
-  unifiedInteraction.dataset.mode = knowledgeActive ? "knowledge" : "dialogue";
-  interactionMode.textContent = knowledgeActive ? "知识补充" : "正常对话";
+  unifiedInteraction.dataset.mode = frontendMode;
+  interactionMode.textContent = frontendMode === "knowledge"
+    ? "知识补充"
+    : (frontendMode === "verdict" ? "是非判断" : "正常对话");
   interactionStage.textContent = knowledgeActive
     ? (knowledgeStageLabels[knowledgeSnapshot?.processing_stage]
       || knowledgeModeLabels[mode]
       || "待机")
-    : (phaseLabels[currentPhase] || "处理中");
+    : (frontendMode === "verdict" && browserRecorder?.isRecording
+      ? "浏览器录音"
+      : (phaseLabels[currentPhase] || "处理中"));
+  deviceRoute.textContent = frontendMode === "verdict"
+    ? "浏览器采集麦克风，仅在本页模拟机械判断。"
+    : (frontendMode === "knowledge"
+      ? "树莓派采集麦克风，复述确认后写入知识库。"
+      : "树莓派采集麦克风，回答从默认扬声器播放。");
+  answerLabel.textContent = frontendMode === "verdict" ? "AI 判断结果" : "知识库回答";
+  audioLabel.textContent = frontendMode === "verdict" ? "语音输出" : "TTS 合成语音";
   knowledgeContext.hidden = !(knowledgeActive || knowledgeEntryId);
+  verdictContext.hidden = frontendMode !== "verdict";
+  modeConversation.setAttribute("aria-pressed", String(frontendMode === "conversation"));
+  modeVerdict.setAttribute("aria-pressed", String(frontendMode === "verdict"));
+  modeKnowledge.setAttribute("aria-pressed", String(frontendMode === "knowledge"));
   unifiedInput.setDisabled(disabled);
 }
 
@@ -483,6 +593,7 @@ function renderKnowledgeState(
     knowledgeReviewAudioPath = KNOWLEDGE_REVIEW_AUDIO_PATH;
     wavPurpose = "knowledge";
     wavPurposeDialogue.setAttribute("aria-pressed", "false");
+    wavPurposeVerdict.setAttribute("aria-pressed", "false");
     wavPurposeKnowledge.setAttribute("aria-pressed", "true");
     advancedWav.open = true;
     resetKnowledgeReviewPlayer();
@@ -533,6 +644,8 @@ function handleKnowledgeError(error, { showFailure = true, captureEntry = false 
 }
 
 function renderState(snapshot) {
+  audioAvailability = ShowroomDeviceInteraction.resolveAudioAvailability(snapshot);
+  audioDeviceStatus.textContent = audioAvailability.message;
   currentPhase = snapshot.phase || "idle";
   hasLastRecording = Boolean(snapshot.has_last_recording);
   phasePill.dataset.phase = currentPhase;
@@ -555,6 +668,43 @@ function renderState(snapshot) {
     localPlaybackActive = false;
   }
   updateControls();
+}
+
+async function renderVerdictState(snapshot) {
+  currentPhase = snapshot.phase || "idle";
+  phasePill.dataset.phase = snapshot.verdict_phase || currentPhase;
+  phase.textContent = snapshot.verdict_phase === "holding"
+    ? "判断完成"
+    : (phaseLabels[currentPhase] || "处理中");
+  statusMessage.textContent = snapshot.message || "判断状态已更新";
+  transcript.textContent = snapshot.transcript || "尚未识别";
+  const verdictLabel = snapshot.verdict === "yes"
+    ? "是"
+    : (snapshot.verdict === "no" ? "否" : "中立");
+  answer.textContent = snapshot.verdict_phase === "idle"
+    ? "判断结果会显示在这里"
+    : `AI 判断：${verdictLabel}`;
+  audioHint.textContent = "是非模式不生成语音回答";
+  verdictScope.textContent = verdictScopeLabels[snapshot.verdict_scope] || "--";
+  verdictBasis.textContent = verdictBasisLabels[snapshot.verdict_basis] || "--";
+  verdictReason.textContent = snapshot.verdict_reason || "等待提问";
+  verdictEvidence.textContent = snapshot.verdict_evidence || "--";
+  verdictElapsed.textContent = Number.isFinite(snapshot.verdict_elapsed_ms)
+    ? `${Math.round(snapshot.verdict_elapsed_ms)} ms`
+    : "--";
+  await updateServoSimulator(snapshot);
+  updateControls();
+}
+
+async function updateServoSimulator(snapshot) {
+  if (!servoSimulator) return;
+  try {
+    await servoSimulator.applySessionState(snapshot);
+  } catch (error) {
+    console.error("servo_simulator_update_failed", error);
+    servoSimulator.destroy();
+    servoSimulator = null;
+  }
 }
 
 function clearAudio() {
@@ -643,10 +793,10 @@ function showKnowledgePlaybackWarning(message, { audioReady = false } = {}) {
 
 function setWavPurpose(purpose) {
   wavPurpose = purpose;
-  const isDialogue = purpose === "dialogue";
-  wavPurposeDialogue.setAttribute("aria-pressed", String(isDialogue));
-  wavPurposeKnowledge.setAttribute("aria-pressed", String(!isDialogue));
-  wavReview.hidden = isDialogue || !wavReviewGate.hasDraft;
+  wavPurposeDialogue.setAttribute("aria-pressed", String(purpose === "dialogue"));
+  wavPurposeVerdict.setAttribute("aria-pressed", String(purpose === "verdict"));
+  wavPurposeKnowledge.setAttribute("aria-pressed", String(purpose === "knowledge"));
+  wavReview.hidden = purpose !== "knowledge" || !wavReviewGate.hasDraft;
   updateControls();
 }
 
@@ -685,9 +835,15 @@ function updateControls() {
   resetDevice.disabled = controlsPending || knowledgeModeActive;
   runTestLabel.textContent = operationPending
     ? "正在处理"
-    : (wavPurpose === "knowledge" ? "生成知识复述" : "开始对话测试");
+    : (wavPurpose === "knowledge"
+      ? "生成知识复述"
+      : (wavPurpose === "verdict" ? "开始是非判断" : "开始对话测试"));
   wavPurposeDialogue.disabled = controlsPending || busy;
+  wavPurposeVerdict.disabled = controlsPending || busy;
   wavPurposeKnowledge.disabled = controlsPending || busy;
+  modeConversation.disabled = controlsPending || busy;
+  modeVerdict.disabled = controlsPending || busy;
+  modeKnowledge.disabled = controlsPending || busy || knowledgeModeActive;
   replayRecording.disabled = (
     controlsPending
     || replayPending
@@ -748,7 +904,8 @@ async function refreshState({ showFailure = false } = {}) {
     const response = await request("/api/device/state", {}, STATUS_REQUEST_TIMEOUT_MS, requestKey);
     const snapshot = await response.json();
     if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
-    renderState(snapshot);
+    if (frontendMode === "conversation") renderState(snapshot);
+    else hasLastRecording = Boolean(snapshot.has_last_recording);
   } catch (error) {
     if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
     if (error.message === "设备凭证无效") stopPolling();
@@ -1151,7 +1308,7 @@ async function releaseKnowledgeControl() {
   if (!knowledgeLeaseToken) {
     clearKnowledgeReviewAudio();
     await refreshKnowledgeState({ showFailure: false });
-    return;
+    return false;
   }
   clearError();
   setKnowledgeOperationPending(true);
@@ -1161,6 +1318,7 @@ async function releaseKnowledgeControl() {
     clearKnowledgeLease();
     clearKnowledgeReviewAudio();
     renderAuthoritativeKnowledgeState(snapshot);
+    return true;
   } catch (error) {
     const errorState = error.payload && error.payload.knowledge_state;
     handleKnowledgeError(error);
@@ -1184,6 +1342,7 @@ async function releaseKnowledgeControl() {
     setKnowledgeOperationPending(false);
     startKnowledgePolling();
   }
+  return false;
 }
 
 async function submitKnowledgeWav(file) {
@@ -1283,6 +1442,56 @@ async function submitDialogueWav(file) {
   await renderTurnResult(payload);
 }
 
+async function submitVerdictWav(file) {
+  frontendMode = "verdict";
+  clearAudio();
+  audioHint.textContent = "是非模式不生成语音回答";
+  statusMessage.textContent = "AI 正在进行是非判断";
+  currentPhase = "thinking";
+  servoSimulator?.startThinking();
+  updateControls();
+  const body = new FormData();
+  body.append("file", file, file.name || "verdict.wav");
+  const response = await request("/api/device/verdict/turn", { method: "POST", body });
+  await renderVerdictState(await response.json());
+}
+
+function failVerdictSimulation() {
+  currentPhase = "idle";
+  servoSimulator?.showNeutral(true);
+}
+
+async function runVerdictShortPress() {
+  clearError();
+  try {
+    requireKey();
+    if (!browserRecorder) throw new Error("浏览器麦克风初始化失败");
+    setOperationPending(true);
+    if (browserRecorder.isRecording) {
+      statusMessage.textContent = "正在结束录音并识别问题";
+      const recording = await browserRecorder.stop();
+      await submitVerdictWav(new File(
+        [recording],
+        "verdict-question.wav",
+        { type: "audio/wav" },
+      ));
+    } else {
+      clearResult();
+      await browserRecorder.start();
+      currentPhase = "recording";
+      phasePill.dataset.phase = "recording";
+      phase.textContent = "录音";
+      statusMessage.textContent = "正在使用本机浏览器麦克风录音";
+    }
+  } catch (error) {
+    await browserRecorder?.cancel();
+    failVerdictSimulation();
+    showError(error);
+  } finally {
+    setOperationPending(false);
+  }
+}
+
 async function runDialogueShortPress() {
   clearError();
   try {
@@ -1364,7 +1573,11 @@ deviceKey.addEventListener("input", () => {
 });
 
 wavPurposeDialogue.addEventListener("click", () => setWavPurpose("dialogue"));
+wavPurposeVerdict.addEventListener("click", () => setWavPurpose("verdict"));
 wavPurposeKnowledge.addEventListener("click", () => setWavPurpose("knowledge"));
+modeConversation.addEventListener("click", () => { void switchFrontendMode("conversation"); });
+modeVerdict.addEventListener("click", () => { void switchFrontendMode("verdict"); });
+modeKnowledge.addEventListener("click", () => acquireKnowledgeControl());
 wavKnowledgeReview.addEventListener("ended", handleKnowledgeReviewEnded);
 wavKnowledgeReview.addEventListener("error", handleKnowledgeReviewError);
 wavKnowledgeDiscard.addEventListener("click", releaseKnowledgeControl);
@@ -1429,6 +1642,8 @@ deviceForm.addEventListener("submit", async (event) => {
     if (wavPurpose === "knowledge") {
       statusMessage.textContent = "正在识别知识并生成复述";
       await submitKnowledgeWav(selected);
+    } else if (wavPurpose === "verdict") {
+      await submitVerdictWav(selected);
     } else {
       await submitDialogueWav(selected);
     }
@@ -1436,6 +1651,7 @@ deviceForm.addEventListener("submit", async (event) => {
     if (wavPurpose === "knowledge") {
       handleKnowledgeError(error);
     } else {
+      if (wavPurpose === "verdict") failVerdictSimulation();
       showError(error);
       audioHint.textContent = "语音尚未生成";
     }
@@ -1505,6 +1721,9 @@ document.addEventListener("visibilitychange", () => {
 
 window.addEventListener("pagehide", () => {
   stopAllPolling();
+  void browserRecorder?.cancel();
+  servoSimulator?.destroy();
+  servoSimulator = null;
   unifiedInput.cancel();
   audio.pause();
   clearKnowledgeReviewAudio();

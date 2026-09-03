@@ -98,3 +98,33 @@ async def test_busy_button_keeps_at_most_one_pending_event():
     finally:
         workflow.release.set()
         await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_partial_start_failure_closes_button_and_resets_service():
+    created = []
+
+    class FailingCallbackButton(FakeButton):
+        def __setattr__(self, name, value):
+            if name == "when_held" and value is not None:
+                raise OSError("callback unavailable")
+            super().__setattr__(name, value)
+
+    def factory(pin, **kwargs):
+        button = FailingCallbackButton(pin, **kwargs)
+        created.append(button)
+        return button
+
+    service = GpioButtonService(
+        pin=17,
+        hold_seconds=1.2,
+        workflow=FakeWorkflow(),
+        button_factory=factory,
+    )
+
+    with pytest.raises(OSError, match="callback unavailable"):
+        service.start()
+
+    assert service.button is None
+    assert created[0].closed is True
+    await service.aclose()

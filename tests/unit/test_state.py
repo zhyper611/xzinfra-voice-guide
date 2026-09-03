@@ -1,7 +1,13 @@
 import pytest
 
-from showroom_guide.models import GuidePhase
+from showroom_guide.models import GuidePhase, InteractionMode, VerdictPhase
 from showroom_guide.state import GuideStateStore, InvalidStateTransition
+from showroom_guide.verdict import (
+    Verdict,
+    VerdictBasis,
+    VerdictDecision,
+    VerdictScope,
+)
 
 
 @pytest.mark.asyncio
@@ -128,3 +134,55 @@ async def test_start_recording_clears_previous_result_atomically():
     assert snapshot.transcript == ""
     assert snapshot.answer == ""
     assert snapshot.message == "正在录音，再次点击后提交"
+
+
+@pytest.mark.asyncio
+async def test_new_turn_clears_previous_verdict_and_publishes_neutral():
+    store = GuideStateStore()
+    queue = store.subscribe()
+    await store.set_verdict(Verdict.YES)
+    await queue.get()
+
+    snapshot = await store.start_recording()
+
+    assert snapshot.verdict is Verdict.NEUTRAL
+    assert (await queue.get()).verdict is Verdict.NEUTRAL
+
+
+def test_snapshot_defaults_to_conversation_without_active_verdict():
+    snapshot = GuideStateStore().snapshot
+
+    assert snapshot.interaction_mode is InteractionMode.CONVERSATION
+    assert snapshot.verdict_phase is VerdictPhase.IDLE
+    assert snapshot.verdict is Verdict.NEUTRAL
+    assert snapshot.verdict_reason == ""
+    assert snapshot.verdict_evidence == ""
+
+
+@pytest.mark.asyncio
+async def test_begin_and_finish_verdict_publish_structured_state_atomically():
+    store = GuideStateStore()
+    await store.set_interaction_mode(InteractionMode.VERDICT)
+
+    thinking = await store.begin_verdict("该产品支持国产算力吗？", generation=7)
+
+    assert thinking.verdict_phase is VerdictPhase.THINKING
+    assert thinking.transcript == "该产品支持国产算力吗？"
+    assert thinking.verdict_generation == 7
+    assert thinking.answer == ""
+
+    decision = VerdictDecision.mixed(
+        scope=VerdictScope.EXHIBITION,
+        verdict=Verdict.YES,
+        basis=VerdictBasis.KNOWLEDGE_BASE,
+        reason="知识库明确支持",
+        evidence="支持国产算力适配",
+    )
+    finished = await store.finish_verdict(decision, VerdictPhase.HOLDING)
+
+    assert finished.verdict is Verdict.YES
+    assert finished.verdict_scope is VerdictScope.EXHIBITION
+    assert finished.verdict_basis is VerdictBasis.KNOWLEDGE_BASE
+    assert finished.verdict_reason == "知识库明确支持"
+    assert finished.verdict_evidence == "支持国产算力适配"
+    assert finished.answer == ""

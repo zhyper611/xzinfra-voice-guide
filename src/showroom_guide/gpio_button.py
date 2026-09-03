@@ -36,19 +36,27 @@ class GpioButtonService:
         if self._button is not None:
             return
         self._loop = asyncio.get_running_loop()
-        self._button = self._button_factory(
-            self._pin,
-            pull_up=True,
-            bounce_time=0.05,
-            hold_time=self._hold_seconds,
-            hold_repeat=False,
-        )
-        self._button.when_held = self._on_held
-        self._button.when_released = self._on_released
-        self._worker = asyncio.create_task(
-            self._run(),
-            name="gpio-button-events",
-        )
+        try:
+            self._button = self._button_factory(
+                self._pin,
+                pull_up=True,
+                bounce_time=0.05,
+                hold_time=self._hold_seconds,
+                hold_repeat=False,
+            )
+            self._button.when_held = self._on_held
+            self._button.when_released = self._on_released
+            self._worker = asyncio.create_task(
+                self._run(),
+                name="gpio-button-events",
+            )
+        except BaseException:
+            button = self._button
+            self._button = None
+            self._loop = None
+            if button is not None:
+                button.close()
+            raise
 
     async def aclose(self) -> None:
         button = self._button

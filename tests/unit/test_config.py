@@ -5,6 +5,107 @@ from pydantic import ValidationError
 from showroom_guide.config import Settings
 
 
+def make_settings(**overrides):
+    values = {
+        "xzkb_base_url": "http://xzkb.test",
+        "xzkb_api_key": "test-key",
+        "xzkb_empty_search_response": "请询问展厅相关内容。",
+        "asr_base_url": "http://asr.test",
+        "asr_api_key": "asr-test-key",
+        "asr_model": "company-asr",
+        "tts_base_url": "http://tts.test",
+        "tts_api_key": "tts-test-key",
+        "tts_model": "company-tts",
+        "device_api_key": "device-test-key",
+    }
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
+
+
+def test_servo_defaults_to_disabled():
+    settings = make_settings()
+
+    assert settings.servo_enabled is False
+    assert settings.servo_pin == 18
+    assert settings.servo_min_angle == 10.0
+    assert settings.servo_max_angle == 140.0
+    assert settings.servo_yes_angle == 20.0
+    assert settings.servo_neutral_angle == 75.0
+    assert settings.servo_no_angle == 130.0
+    assert settings.servo_min_pulse_width_seconds == 0.0005
+    assert settings.servo_max_pulse_width_seconds == 0.0025
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"servo_min_angle": 140, "servo_max_angle": 10},
+        {
+            "servo_min_pulse_width_seconds": 0.0025,
+            "servo_max_pulse_width_seconds": 0.0005,
+        },
+        {
+            "servo_enabled": True,
+            "gpio_button_enabled": True,
+            "servo_pin": 17,
+            "ptt_pin": 17,
+        },
+    ],
+)
+def test_invalid_servo_configuration_is_rejected(overrides):
+    with pytest.raises(ValidationError):
+        make_settings(**overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"servo_yes_angle": 75, "servo_neutral_angle": 75},
+        {"servo_yes_angle": 80, "servo_neutral_angle": 60, "servo_no_angle": 70},
+        {"servo_yes_angle": 5},
+        {"servo_no_angle": 150},
+    ],
+)
+def test_invalid_servo_verdict_positions_are_rejected(overrides):
+    with pytest.raises(ValidationError):
+        make_settings(**overrides)
+
+
+def test_verdict_defaults_to_disabled():
+    settings = make_settings()
+
+    assert settings.verdict_enabled is False
+    assert settings.verdict_base_url is None
+    assert settings.verdict_api_key is None
+    assert settings.verdict_timeout_seconds == 15.0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"verdict_enabled": True},
+        {
+            "verdict_enabled": True,
+            "verdict_base_url": "https://kb.test",
+        },
+        {"verdict_enabled": True, "verdict_api_key": "verdict-secret"},
+    ],
+)
+def test_verdict_enabled_requires_complete_application_credentials(overrides):
+    with pytest.raises(ValidationError, match="判断应用"):
+        make_settings(**overrides)
+
+
+def test_verdict_application_does_not_require_model_name():
+    settings = make_settings(
+        verdict_enabled=True,
+        verdict_base_url="https://kb.test/",
+        verdict_api_key="verdict-secret",
+    )
+
+    assert settings.verdict_base_url == "https://kb.test"
+
+
 def test_settings_requires_service_credentials(monkeypatch):
     for name in (
         "GUIDE_XZKB_BASE_URL",
@@ -63,6 +164,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.xzkb_total_timeout_seconds == 120.0
     assert settings.audio_ttl_seconds == 600.0
     assert settings.audio_items_per_session == 3
+    assert settings.audio_max_item_bytes == 8 * 1024 * 1024
+    assert settings.audio_total_bytes == 256 * 1024 * 1024
     assert settings.device_api_key.get_secret_value() == "device-test-key"
     assert settings.device_max_upload_bytes == 10 * 1024 * 1024
     assert settings.faq_cache_enabled is True
@@ -79,6 +182,8 @@ def test_settings_normalizes_base_urls(monkeypatch):
     assert settings.local_recording_max_seconds == 60.0
     assert settings.local_recording_min_seconds == 0.5
     assert settings.local_recording_min_dbfs == -45.0
+    assert settings.local_recording_max_bytes == 4 * 1024 * 1024
+    assert settings.answer_max_chars == 220
     assert settings.knowledge_web_lease_seconds == 120.0
 
 

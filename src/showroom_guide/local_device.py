@@ -50,12 +50,14 @@ class LocalDeviceWorkflow:
         max_recording_seconds: float = 60.0,
         min_recording_seconds: float = 0.5,
         min_recording_dbfs: float = -45.0,
+        before_recording: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._session = session
         self._audio = audio
         self._max_recording_seconds = max_recording_seconds
         self._min_recording_seconds = min_recording_seconds
         self._min_recording_dbfs = min_recording_dbfs
+        self._before_recording = before_recording
         self._mode = LocalDeviceMode.IDLE
         self._lifecycle_lock = asyncio.Lock()
         self._timeout_task: asyncio.Task[None] | None = None
@@ -84,6 +86,9 @@ class LocalDeviceWorkflow:
             self._ensure_can_start()
             self._mode = LocalDeviceMode.RECORDING
             try:
+                if self._before_recording is not None:
+                    await self._before_recording()
+                await self._audio.ensure_ready_for_recording()
                 await self._play_cue_safely(
                     self._audio.play_start_cue,
                     "start",
@@ -205,8 +210,6 @@ class LocalDeviceWorkflow:
                 raise RecordingTooShort(
                     "录音时间太短，请听到开始提示音后再说话。"
                 )
-            if metrics.dbfs < self._min_recording_dbfs:
-                raise NoSpeechDetected(NO_SPEECH_MESSAGE)
         except NoSpeechDetected as error:
             await self._wait_for_cue(cue_task)
             await self._session.fail_recording(str(error))

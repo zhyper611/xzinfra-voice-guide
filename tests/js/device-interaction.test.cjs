@@ -12,7 +12,88 @@ const {
   createWavReviewGate,
   rehydrateKnowledgeReview,
   resolveKnowledgeDraftTransition,
+  resolveAudioAvailability,
+  resolveFrontendModeSwitch,
+  shouldDisableUnifiedAction,
 } = require("../../src/showroom_guide/web/device-interaction.js");
+
+test("local dialogue requires both microphone and speaker", () => {
+  assert.deepEqual(resolveAudioAvailability({
+    capture_available: false,
+    playback_available: true,
+    audio_device_error: null,
+  }), {
+    ready: false,
+    message: "未检测到可用麦克风",
+  });
+  assert.deepEqual(resolveAudioAvailability({
+    capture_available: true,
+    playback_available: false,
+    audio_device_error: null,
+  }), {
+    ready: false,
+    message: "未检测到可用扬声器",
+  });
+  assert.deepEqual(resolveAudioAvailability({
+    capture_available: true,
+    playback_available: true,
+    audio_device_error: null,
+  }), {
+    ready: true,
+    message: "麦克风和扬声器已就绪",
+  });
+});
+
+test("offline audio does not disable an available unified action", () => {
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: true,
+    hasShortAction: true,
+    hasLongAction: false,
+  }), false);
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: true,
+    hasShortAction: false,
+    hasLongAction: true,
+  }), false);
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: false,
+    hasShortAction: true,
+    hasLongAction: true,
+  }), true);
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: true,
+    hasShortAction: false,
+    hasLongAction: false,
+  }), true);
+});
+
+test("empty owned knowledge mode releases before switching tabs", () => {
+  assert.equal(resolveFrontendModeSwitch({
+    targetMode: "conversation",
+    knowledgeMode: "ready",
+    ownsKnowledge: true,
+  }), "release");
+  assert.equal(resolveFrontendModeSwitch({
+    targetMode: "verdict",
+    knowledgeMode: "inactive",
+    ownsKnowledge: false,
+  }), "direct");
+});
+
+test("knowledge drafts and active recording block tab switching", () => {
+  for (const knowledgeMode of ["recording", "processing", "confirming"]) {
+    assert.equal(resolveFrontendModeSwitch({
+      targetMode: "conversation",
+      knowledgeMode,
+      ownsKnowledge: true,
+    }), "blocked");
+  }
+  assert.equal(resolveFrontendModeSwitch({
+    targetMode: "conversation",
+    knowledgeMode: "ready",
+    ownsKnowledge: false,
+  }), "blocked");
+});
 
 class FakeEventTarget {
   constructor() {

@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -11,8 +11,9 @@ from showroom_guide import main as main_module
 from showroom_guide.async_outbox import AsyncKnowledgeOutbox
 from showroom_guide.config import Settings
 from showroom_guide.knowledge_web import KnowledgeWebError
-from showroom_guide.main import Runtime, create_runtime
+from showroom_guide.main import Runtime, create_app, create_runtime
 from showroom_guide.main import cleanup_sessions
+from showroom_guide.verdict_motion import WebSimulationOutput
 
 
 def make_settings(**overrides) -> Settings:
@@ -89,7 +90,141 @@ def make_close_test_runtime(events, **probes) -> Runtime:
             "gpio_button",
             make_close_probe("gpio_button", events),
         ),
+        servo_motion=probes.get("servo_motion"),
     )
+
+
+@pytest.mark.asyncio
+async def test_disabled_servo_does_not_construct_gpio(monkeypatch):
+    constructor = MagicMock()
+    monkeypatch.setattr(main_module, "GpioZeroServoDriver", constructor, raising=False)
+
+    runtime = create_runtime(make_settings(servo_enabled=False))
+
+    assert runtime.servo_motion is None
+    constructor.assert_not_called()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_verdict_runtime_without_servo_uses_simulation_output():
+    runtime = create_runtime(
+        make_settings(
+            verdict_enabled=True,
+            verdict_base_url="http://verdict.test",
+            verdict_api_key="verdict-test-key",
+        )
+    )
+
+    assert runtime.verdict_workflow is runtime.device._verdict_workflow
+    assert isinstance(runtime.verdict_workflow.motion, WebSimulationOutput)
+    assert runtime.verdict_workflow.motion._state is runtime.device._state
+
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_web_verdict_sessions_are_isolated_from_device_and_each_other():
+    runtime = create_runtime(
+        make_settings(
+            verdict_enabled=True,
+            verdict_base_url="http://verdict.test",
+            verdict_api_key="verdict-test-key",
+        )
+    )
+
+    first, _ = await runtime.sessions.get_or_create(None)
+    second, _ = await runtime.sessions.get_or_create(None)
+
+    assert first.verdict_workflow is not None
+    assert second.verdict_workflow is not None
+    assert isinstance(first.verdict_workflow.motion, WebSimulationOutput)
+    assert isinstance(second.verdict_workflow.motion, WebSimulationOutput)
+    assert first.verdict_workflow.motion._state is first.state
+    assert second.verdict_workflow.motion._state is second.state
+    assert first.verdict_workflow is not second.verdict_workflow
+    assert first.verdict_workflow is not runtime.verdict_workflow
+
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_enabled_servo_is_injected_into_device_workflows(monkeypatch):
+    driver = MagicMock()
+    constructor = MagicMock(return_value=driver)
+    monkeypatch.setattr(main_module, "GpioZeroServoDriver", constructor, raising=False)
+
+    runtime = create_runtime(
+        make_settings(servo_enabled=True, gpio_button_enabled=True)
+    )
+
+    constructor.assert_called_once_with(
+        pin=18,
+        min_angle=10.0,
+        max_angle=140.0,
+        min_pulse_width=0.0005,
+        max_pulse_width=0.0025,
+    )
+    assert runtime.servo_motion is not None
+    assert runtime.local_device._before_recording.__self__ is runtime.servo_motion
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_servo_initialization_failure_does_not_abort_runtime(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "GpioZeroServoDriver",
+        MagicMock(side_effect=OSError("GPIO unavailable")),
+        raising=False,
+    )
+
+    runtime = create_runtime(make_settings(servo_enabled=True))
+
+    assert runtime.servo_motion is None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_and_closes_servo_once():
+    runtime = create_runtime(make_settings())
+    servo = SimpleNamespace(enter_mode=AsyncMock(), aclose=AsyncMock())
+    runtime.servo_motion = servo
+    app = create_app(runtime)
+
+    async with app.router.lifespan_context(app):
+        servo.enter_mode.assert_awaited_once_with()
+
+    servo.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_gpio_start_failure_does_not_abort_web_lifespan():
+    runtime = create_runtime(make_settings())
+    gpio = SimpleNamespace(
+        start=MagicMock(side_effect=OSError("GPIO unavailable")),
+        aclose=AsyncMock(),
+    )
+    runtime.gpio_button = gpio
+    app = create_app(runtime)
+
+    async with app.router.lifespan_context(app):
+        gpio.start.assert_called_once_with()
+
+    gpio.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_servo_after_gpio_before_other_resources():
+    events = []
+    runtime = make_close_test_runtime(
+        events,
+        servo_motion=make_close_probe("servo_motion", events),
+    )
+
+    await runtime.aclose()
+
+    assert events[:3] == ["gpio_button", "servo_motion", "knowledge_web"]
 
 
 @pytest.mark.asyncio
@@ -121,6 +256,8 @@ async def test_runtime_builds_isolated_device_with_shared_clients_and_gates():
     assert runtime.local_device._min_recording_dbfs == -45.0
     assert runtime.device._controller._playback_timeout_seconds == 300.0
     assert runtime.device._controller._xzkb_total_timeout_seconds == 120.0
+    assert runtime.device._controller._answer_max_chars == 220
+    assert runtime.device._controller._tts_audio_max_bytes == 8 * 1024 * 1024
     assert runtime.local_device._audio._no_speech_prompt[:4] == b"RIFF"
     assert runtime.button_workflow is None
     assert runtime.knowledge_outbox is None

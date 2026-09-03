@@ -1,6 +1,12 @@
 import asyncio
 
-from showroom_guide.models import GuidePhase, GuideSnapshot
+from showroom_guide.models import (
+    GuidePhase,
+    GuideSnapshot,
+    InteractionMode,
+    VerdictPhase,
+)
+from showroom_guide.verdict import Verdict, VerdictBasis, VerdictDecision
 
 
 ALLOWED = {
@@ -88,6 +94,7 @@ class GuideStateStore:
                 transcript=transcript,
                 answer="",
                 message="正在查询展项资料",
+                verdict=Verdict.NEUTRAL,
             )
 
     async def start_recording(self) -> GuideSnapshot:
@@ -100,6 +107,7 @@ class GuideStateStore:
                 transcript="",
                 answer="",
                 message="正在录音，再次点击后提交",
+                verdict=Verdict.NEUTRAL,
             )
 
     async def set_transcript(self, transcript: str) -> GuideSnapshot:
@@ -114,6 +122,75 @@ class GuideStateStore:
 
     async def set_message(self, message: str) -> GuideSnapshot:
         return await self._update(message=message)
+
+    async def set_verdict(self, verdict: Verdict) -> GuideSnapshot:
+        return await self._update(verdict=verdict)
+
+    async def set_interaction_mode(
+        self,
+        mode: InteractionMode,
+    ) -> GuideSnapshot:
+        return await self._update(interaction_mode=mode)
+
+    async def begin_verdict(
+        self,
+        transcript: str,
+        *,
+        generation: int,
+    ) -> GuideSnapshot:
+        return await self._update(
+            phase=GuidePhase.THINKING,
+            interaction_mode=InteractionMode.VERDICT,
+            verdict_phase=VerdictPhase.THINKING,
+            transcript=transcript,
+            answer="",
+            message="正在进行是非判断",
+            verdict_scope=None,
+            verdict_basis=VerdictBasis.NONE,
+            verdict_reason="",
+            verdict_evidence="",
+            verdict_failure=None,
+            verdict_generation=generation,
+            verdict_elapsed_ms=None,
+        )
+
+    async def finish_verdict(
+        self,
+        decision: VerdictDecision,
+        phase: VerdictPhase,
+        *,
+        elapsed_ms: float | None = None,
+    ) -> GuideSnapshot:
+        if decision.scope is None:
+            raise ValueError("mixed verdict decision requires a scope")
+        return await self._update(
+            phase=GuidePhase.IDLE,
+            verdict_phase=phase,
+            verdict=decision.verdict,
+            verdict_scope=decision.scope,
+            verdict_basis=decision.basis,
+            verdict_reason=decision.reason,
+            verdict_evidence=decision.evidence,
+            verdict_failure=decision.failure,
+            verdict_elapsed_ms=elapsed_ms,
+            message="判断完成",
+        )
+
+    async def set_verdict_motion(self, event: object) -> GuideSnapshot:
+        phase = getattr(event, "phase", None)
+        verdict = getattr(event, "verdict", None)
+        generation = getattr(event, "generation", None)
+        if not isinstance(phase, VerdictPhase):
+            raise TypeError("motion event requires a verdict phase")
+        if not isinstance(verdict, Verdict):
+            raise TypeError("motion event requires a verdict")
+        if not isinstance(generation, int) or generation < 0:
+            raise TypeError("motion event requires a generation")
+        return await self._update(
+            verdict_phase=phase,
+            verdict=verdict,
+            verdict_generation=generation,
+        )
 
     async def reset(self) -> GuideSnapshot:
         async with self._lock:

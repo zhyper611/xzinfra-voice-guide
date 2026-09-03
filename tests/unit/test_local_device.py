@@ -79,6 +79,7 @@ class FakeAudio:
     def __init__(self, captured=None) -> None:
         self.captured = captured or make_wav()
         self.play_start_cue = AsyncMock()
+        self.ensure_ready_for_recording = AsyncMock()
         self.play_stop_cue = AsyncMock()
         self.play_no_speech_prompt = AsyncMock()
         self.play_prompt = AsyncMock()
@@ -96,10 +97,51 @@ async def let_background_tasks_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_before_recording_runs_before_cue_and_microphone():
+    events = []
+    session = FakeSession()
+    audio = FakeAudio()
+    before_recording = AsyncMock(
+        side_effect=lambda: events.append("servo-quiet")
+    )
+    audio.play_start_cue.side_effect = lambda: events.append("start-cue")
+    audio.start_recording.side_effect = lambda: events.append("audio-start")
+    workflow = LocalDeviceWorkflow(
+        session=session,
+        audio=audio,
+        before_recording=before_recording,
+    )
+
+    await workflow.start_recording()
+
+    assert events == ["servo-quiet", "start-cue", "audio-start"]
+    await workflow.aclose()
+
+
+@pytest.mark.asyncio
+async def test_before_recording_failure_does_not_open_microphone():
+    session = FakeSession()
+    audio = FakeAudio()
+    workflow = LocalDeviceWorkflow(
+        session=session,
+        audio=audio,
+        before_recording=AsyncMock(side_effect=OSError("servo failed")),
+    )
+
+    with pytest.raises(OSError, match="servo failed"):
+        await workflow.start_recording()
+
+    assert workflow.is_idle is True
+    audio.play_start_cue.assert_not_awaited()
+    audio.start_recording.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_start_stop_processes_and_plays_in_order():
     events = []
     session = FakeSession()
     audio = FakeAudio()
+    audio.ensure_ready_for_recording.side_effect = lambda: events.append("device-check")
     audio.play_start_cue.side_effect = lambda: events.append("start-cue")
     audio.play_stop_cue.side_effect = lambda: events.append("stop-cue")
     audio.start_recording.side_effect = lambda: events.append("audio-start")
@@ -132,6 +174,7 @@ async def test_start_stop_processes_and_plays_in_order():
 
     assert snapshot.phase is GuidePhase.RECORDING
     assert result is session.result
+    assert events.index("device-check") < events.index("start-cue")
     assert events.index("start-cue") < events.index("audio-start")
     assert events.index("audio-start") < events.index("state-recording")
     assert events.index("audio-stop") < events.index("stop-cue")
@@ -141,6 +184,22 @@ async def test_start_stop_processes_and_plays_in_order():
     assert events.index("play") < events.index("finished")
     session.get_audio.assert_called_once_with("audio-id")
     assert not workflow.is_recording
+
+
+@pytest.mark.asyncio
+async def test_failed_device_check_does_not_play_start_cue():
+    audio = FakeAudio()
+    audio.ensure_ready_for_recording.side_effect = LocalAudioError(
+        "未检测到可用麦克风"
+    )
+    workflow = LocalDeviceWorkflow(session=FakeSession(), audio=audio)
+
+    with pytest.raises(LocalAudioError, match="未检测到可用麦克风"):
+        await workflow.start_recording()
+
+    audio.play_start_cue.assert_not_awaited()
+    audio.start_recording.assert_not_awaited()
+    assert workflow.is_idle
 
 
 @pytest.mark.asyncio
@@ -277,7 +336,7 @@ async def test_short_recording_is_rejected_before_asr():
 
 
 @pytest.mark.asyncio
-async def test_silent_recording_is_rejected_before_asr():
+async def test_silent_recording_is_passed_to_asr_without_volume_guessing():
     session = FakeSession()
     audio = FakeAudio(captured=make_wav(sample=0))
     workflow = LocalDeviceWorkflow(
@@ -287,14 +346,11 @@ async def test_silent_recording_is_rejected_before_asr():
     )
     await workflow.start_recording()
 
-    with pytest.raises(NoSpeechDetected):
-        await workflow.stop_recording()
+    await workflow.stop_recording()
 
-    session.process_recorded_wav.assert_not_awaited()
-    audio.play_no_speech_prompt.assert_awaited_once_with()
-    session.fail_recording.assert_awaited_once_with(
-        "没有听清您的声音，请靠近麦克风后再试一次。"
-    )
+    session.process_recorded_wav.assert_awaited_once_with(audio.captured)
+    audio.play_no_speech_prompt.assert_not_awaited()
+    session.fail_recording.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -316,6 +372,9 @@ async def test_asr_empty_result_plays_no_speech_prompt():
 @pytest.mark.asyncio
 async def test_no_speech_prompt_failure_preserves_detection_error():
     session = FakeSession()
+    session.process_recorded_wav.side_effect = NoSpeechDetected(
+        "没有听清您的声音，请靠近麦克风后再试一次。"
+    )
     audio = FakeAudio(captured=make_wav(sample=0))
     audio.play_no_speech_prompt.side_effect = LocalAudioError("output failed")
     workflow = LocalDeviceWorkflow(session=session, audio=audio)
@@ -324,7 +383,7 @@ async def test_no_speech_prompt_failure_preserves_detection_error():
     with pytest.raises(NoSpeechDetected):
         await workflow.stop_recording()
 
-    session.process_recorded_wav.assert_not_awaited()
+    session.process_recorded_wav.assert_awaited_once_with(audio.captured)
 
 
 @pytest.mark.asyncio
@@ -386,6 +445,7 @@ async def test_completed_recording_can_be_replayed_locally():
 
     await workflow.start_recording()
     await workflow.stop_recording()
+    await let_background_tasks_run()
     await workflow.replay_last_recording()
 
     assert workflow.has_last_recording is True
@@ -432,12 +492,12 @@ async def test_locally_silent_recording_can_be_replayed():
     workflow = LocalDeviceWorkflow(session=session, audio=audio)
 
     await workflow.start_recording()
-    with pytest.raises(NoSpeechDetected):
-        await workflow.stop_recording()
+    await workflow.stop_recording()
+    await let_background_tasks_run()
     await workflow.replay_last_recording()
 
     assert workflow.has_last_recording is True
-    audio.play.assert_awaited_once_with(captured)
+    audio.play.assert_any_await(captured)
 
 
 @pytest.mark.asyncio

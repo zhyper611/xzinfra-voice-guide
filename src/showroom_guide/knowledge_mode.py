@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -55,12 +56,14 @@ class KnowledgeModeWorkflow:
         max_recording_seconds: float = 60.0,
         min_recording_seconds: float = 0.5,
         min_recording_dbfs: float = -45.0,
+        before_recording: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._audio = audio
         self._capture = capture_session
         self._max_recording_seconds = max_recording_seconds
         self._min_recording_seconds = min_recording_seconds
         self._min_recording_dbfs = min_recording_dbfs
+        self._before_recording = before_recording
         self._state = KnowledgeModeState.INACTIVE
         self._operation_lock = asyncio.Lock()
         self._timeout_task: asyncio.Task[None] | None = None
@@ -160,6 +163,8 @@ class KnowledgeModeWorkflow:
         await self.cancel()
 
     async def _start_recording(self) -> None:
+        if self._before_recording is not None:
+            await self._before_recording()
         await self._play_cue_safely(self._audio.play_start_cue)
         await self._audio.start_recording()
         self._state = KnowledgeModeState.RECORDING
