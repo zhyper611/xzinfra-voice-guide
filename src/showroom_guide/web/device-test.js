@@ -496,10 +496,11 @@ function updateUnifiedAction() {
   if (knowledgeActive) frontendMode = "knowledge";
   else if (frontendMode === "knowledge") frontendMode = "conversation";
   const keyReady = Boolean(deviceKey.value.trim());
-  const requiresAudio = (
-    (mode === "inactive" && currentPhase !== "recording")
-    || mode === "ready"
-  );
+  const requiresAudio = ShowroomDeviceInteraction.requiresLocalAudio({
+    frontendMode,
+    knowledgeMode: mode,
+    phase: currentPhase,
+  });
   const disabled = (
     !keyReady
     || (!action.short && !action.long)

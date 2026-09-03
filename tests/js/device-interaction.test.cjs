@@ -13,6 +13,7 @@ const {
   rehydrateKnowledgeReview,
   resolveKnowledgeDraftTransition,
   resolveAudioAvailability,
+  requiresLocalAudio,
 } = require("../../src/showroom_guide/web/device-interaction.js");
 
 test("local dialogue requires both microphone and speaker", () => {
@@ -40,6 +41,24 @@ test("local dialogue requires both microphone and speaker", () => {
     ready: true,
     message: "麦克风和扬声器已就绪",
   });
+});
+
+test("browser verdict mode does not require Raspberry Pi audio devices", () => {
+  assert.equal(requiresLocalAudio({
+    frontendMode: "verdict",
+    knowledgeMode: "inactive",
+    phase: "idle",
+  }), false);
+  assert.equal(requiresLocalAudio({
+    frontendMode: "conversation",
+    knowledgeMode: "inactive",
+    phase: "idle",
+  }), true);
+  assert.equal(requiresLocalAudio({
+    frontendMode: "knowledge",
+    knowledgeMode: "ready",
+    phase: "idle",
+  }), true);
 });
 
 class FakeEventTarget {

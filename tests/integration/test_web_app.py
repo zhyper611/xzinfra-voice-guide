@@ -219,6 +219,8 @@ def test_device_page_uses_unified_button_and_advanced_wav():
 
     required_ids = [
         "unified-action",
+        "device-route",
+        "audio-device-status",
         "interaction-mode",
         "interaction-stage",
         "gesture-hint",
