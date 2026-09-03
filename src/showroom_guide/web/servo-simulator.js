@@ -14,6 +14,24 @@
     (resolve) => setTimeout(resolve, milliseconds),
   );
 
+  function buildMotionAngles({
+    yesAngle = ANGLES.yes,
+    neutralAngle = ANGLES.neutral,
+    noAngle = ANGLES.no,
+    windupOffset = 20,
+  } = {}) {
+    const toward = target => neutralAngle + Math.sign(target - neutralAngle)
+      * Math.min(Math.abs(target - neutralAngle), windupOffset);
+    return {
+      thinking: [yesAngle, noAngle],
+      windup: { yes: toward(noAngle), no: toward(yesAngle) },
+    };
+  }
+
+  function angleToRotation(angle) {
+    return -135 + ((angle - ANGLES.yes) * 90 / (ANGLES.no - ANGLES.yes));
+  }
+
   function create({
     render = () => {},
     sleep = defaultSleep,
@@ -24,6 +42,11 @@
     noAngle = ANGLES.no,
   } = {}) {
     const angles = { yes: yesAngle, neutral: neutralAngle, no: noAngle };
+    const motionAngles = buildMotionAngles({
+      yesAngle,
+      neutralAngle,
+      noAngle,
+    });
     let mode = "follow";
     let phase = "idle";
     let verdict = "neutral";
@@ -71,11 +94,10 @@
         return;
       }
       const current = ++operation;
-      const opposite = target === "yes" ? "no" : "yes";
       phase = "windup";
-      verdict = opposite;
-      angle = angles[opposite];
-      emit(`windup-${opposite}`);
+      verdict = "neutral";
+      angle = motionAngles.windup[target];
+      emit("windup");
       await sleep(windupMilliseconds);
       if (destroyed || current !== operation) return;
       phase = "decisive";
@@ -139,6 +161,15 @@
     const output = find("#servo-verdict-output");
     const phaseOutput = find("#servo-phase-output");
     const buttons = [...root.querySelectorAll("[data-servo-verdict]")];
+    const motionAngles = buildMotionAngles(createOptions);
+    stage.style.setProperty(
+      "--servo-thinking-yes-rotation",
+      `${angleToRotation(motionAngles.thinking[0])}deg`,
+    );
+    stage.style.setProperty(
+      "--servo-thinking-no-rotation",
+      `${angleToRotation(motionAngles.thinking[1])}deg`,
+    );
     const listeners = [];
     const listen = (node, type, callback) => {
       node.addEventListener(type, callback);
@@ -178,5 +209,5 @@
     return controller;
   }
 
-  return { create, bind };
+  return { create, bind, buildMotionAngles };
 }));

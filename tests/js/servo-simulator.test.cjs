@@ -2,18 +2,35 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const ServoSimulator = require("../../src/showroom_guide/web/servo-simulator.js");
 
-test("yes result winds up right, snaps left, and stays left", async () => {
-  const simulator = ServoSimulator.create({ sleep: async () => {} });
+test("yes result uses a small opposite windup then snaps left", async () => {
+  const snapshots = [];
+  const simulator = ServoSimulator.create({
+    sleep: async () => {},
+    render: value => snapshots.push(value),
+  });
 
   simulator.startThinking();
   await simulator.showVerdict("yes");
 
-  assert.deepEqual(simulator.history.slice(-2), ["windup-no", "holding-yes"]);
+  const windup = snapshots.findLast(value => value.phase === "windup");
+  assert.equal(windup.angle, 95);
+  assert.equal(windup.verdict, "neutral");
   assert.deepEqual(simulator.getSnapshot(), {
     mode: "follow",
     phase: "holding",
     verdict: "yes",
     angle: 20,
+  });
+});
+
+test("motion angles use full thinking range and clamp custom windup", () => {
+  assert.deepEqual(ServoSimulator.buildMotionAngles({
+    yesAngle: 40,
+    neutralAngle: 50,
+    noAngle: 60,
+  }), {
+    thinking: [40, 60],
+    windup: { yes: 60, no: 40 },
   });
 });
 

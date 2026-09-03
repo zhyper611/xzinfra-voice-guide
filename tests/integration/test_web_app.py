@@ -296,6 +296,8 @@ def test_device_styles_define_stable_responsive_servo_stage():
     assert ".servo-arm" in css
     assert "transform-origin: 18px 50%" in css
     assert "--servo-angle" in css
+    assert "--servo-thinking-yes-rotation" in css
+    assert "--servo-thinking-no-rotation" in css
     assert "@media (max-width: 760px)" in css
 
 

@@ -1461,8 +1461,8 @@ button:disabled {
 }
 
 @keyframes servo-thinking {
-  from { transform: rotate(-106deg); }
-  to { transform: rotate(-74deg); }
+  from { transform: rotate(var(--servo-thinking-yes-rotation, -135deg)); }
+  to { transform: rotate(var(--servo-thinking-no-rotation, -45deg)); }
 }
 
 .servo-arm i {
