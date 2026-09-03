@@ -419,6 +419,35 @@ function setFrontendMode(mode) {
   updateControls();
 }
 
+async function switchFrontendMode(mode) {
+  const knowledgeMode = knowledgeSnapshot?.mode_state || "inactive";
+  const ownsKnowledge = (
+    knowledgeSnapshot?.control_state === "owned"
+    && Boolean(knowledgeLeaseToken)
+  );
+  const action = ShowroomDeviceInteraction.resolveFrontendModeSwitch({
+    targetMode: mode,
+    knowledgeMode,
+    ownsKnowledge,
+  });
+  if (action === "direct") {
+    setFrontendMode(mode);
+    return;
+  }
+  if (action === "release") {
+    if (await releaseKnowledgeControl()) setFrontendMode(mode);
+    return;
+  }
+  const messages = {
+    recording: "请先短按停止录音，再处理当前知识草稿。",
+    processing: "知识补充正在处理，请稍候。",
+    confirming: "已有待确认知识，请先保存、重录或放弃。",
+  };
+  deviceError.textContent = ownsKnowledge
+    ? (messages[knowledgeMode] || "当前知识补充尚未结束。")
+    : "知识补充正被其他页面使用，暂时不能切换模式。";
+}
+
 function showKnowledgeError(error) {
   deviceError.textContent = error instanceof TypeError
     ? "无法连接展厅服务，请检查网络或服务状态"
@@ -817,8 +846,8 @@ function updateControls() {
   wavPurposeDialogue.disabled = controlsPending || busy;
   wavPurposeVerdict.disabled = controlsPending || busy;
   wavPurposeKnowledge.disabled = controlsPending || busy;
-  modeConversation.disabled = controlsPending || busy || knowledgeModeActive;
-  modeVerdict.disabled = controlsPending || busy || knowledgeModeActive;
+  modeConversation.disabled = controlsPending || busy;
+  modeVerdict.disabled = controlsPending || busy;
   modeKnowledge.disabled = controlsPending || busy || knowledgeModeActive;
   replayRecording.disabled = (
     controlsPending
@@ -1284,7 +1313,7 @@ async function releaseKnowledgeControl() {
   if (!knowledgeLeaseToken) {
     clearKnowledgeReviewAudio();
     await refreshKnowledgeState({ showFailure: false });
-    return;
+    return false;
   }
   clearError();
   setKnowledgeOperationPending(true);
@@ -1294,6 +1323,7 @@ async function releaseKnowledgeControl() {
     clearKnowledgeLease();
     clearKnowledgeReviewAudio();
     renderAuthoritativeKnowledgeState(snapshot);
+    return true;
   } catch (error) {
     const errorState = error.payload && error.payload.knowledge_state;
     handleKnowledgeError(error);
@@ -1317,6 +1347,7 @@ async function releaseKnowledgeControl() {
     setKnowledgeOperationPending(false);
     startKnowledgePolling();
   }
+  return false;
 }
 
 async function submitKnowledgeWav(file) {
@@ -1549,8 +1580,8 @@ deviceKey.addEventListener("input", () => {
 wavPurposeDialogue.addEventListener("click", () => setWavPurpose("dialogue"));
 wavPurposeVerdict.addEventListener("click", () => setWavPurpose("verdict"));
 wavPurposeKnowledge.addEventListener("click", () => setWavPurpose("knowledge"));
-modeConversation.addEventListener("click", () => setFrontendMode("conversation"));
-modeVerdict.addEventListener("click", () => setFrontendMode("verdict"));
+modeConversation.addEventListener("click", () => { void switchFrontendMode("conversation"); });
+modeVerdict.addEventListener("click", () => { void switchFrontendMode("verdict"); });
 modeKnowledge.addEventListener("click", () => acquireKnowledgeControl());
 wavKnowledgeReview.addEventListener("ended", handleKnowledgeReviewEnded);
 wavKnowledgeReview.addEventListener("error", handleKnowledgeReviewError);

@@ -24,6 +24,13 @@
     );
   }
 
+  function resolveFrontendModeSwitch({ targetMode, knowledgeMode, ownsKnowledge }) {
+    if (!new Set(["conversation", "verdict"]).has(targetMode)) return "blocked";
+    if (knowledgeMode === "inactive") return "direct";
+    if (knowledgeMode === "ready" && ownsKnowledge) return "release";
+    return "blocked";
+  }
+
   function bindUnifiedPress({ button, releaseTarget, gesture }) {
     let activeInput = null;
 
@@ -305,6 +312,7 @@
   return {
     bindUnifiedPress,
     resolveAudioAvailability,
+    resolveFrontendModeSwitch,
     requiresLocalAudio,
     captureKnowledgeEntry,
     createKnowledgeDraftSourceStore,

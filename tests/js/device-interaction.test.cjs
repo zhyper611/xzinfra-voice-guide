@@ -13,6 +13,7 @@ const {
   rehydrateKnowledgeReview,
   resolveKnowledgeDraftTransition,
   resolveAudioAvailability,
+  resolveFrontendModeSwitch,
   requiresLocalAudio,
 } = require("../../src/showroom_guide/web/device-interaction.js");
 
@@ -59,6 +60,34 @@ test("browser verdict mode does not require Raspberry Pi audio devices", () => {
     knowledgeMode: "ready",
     phase: "idle",
   }), true);
+});
+
+test("empty owned knowledge mode releases before switching tabs", () => {
+  assert.equal(resolveFrontendModeSwitch({
+    targetMode: "conversation",
+    knowledgeMode: "ready",
+    ownsKnowledge: true,
+  }), "release");
+  assert.equal(resolveFrontendModeSwitch({
+    targetMode: "verdict",
+    knowledgeMode: "inactive",
+    ownsKnowledge: false,
+  }), "direct");
+});
+
+test("knowledge drafts and active recording block tab switching", () => {
+  for (const knowledgeMode of ["recording", "processing", "confirming"]) {
+    assert.equal(resolveFrontendModeSwitch({
+      targetMode: "conversation",
+      knowledgeMode,
+      ownsKnowledge: true,
+    }), "blocked");
+  }
+  assert.equal(resolveFrontendModeSwitch({
+    targetMode: "conversation",
+    knowledgeMode: "ready",
+    ownsKnowledge: false,
+  }), "blocked");
 });
 
 class FakeEventTarget {
