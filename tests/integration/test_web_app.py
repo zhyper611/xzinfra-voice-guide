@@ -7,6 +7,7 @@ import pytest
 from fastapi import WebSocket
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from showroom_guide.audio_devices import AudioDeviceStatus
 
 from showroom_guide.controller import (
     GuideServiceUnavailable,
@@ -50,6 +51,14 @@ class FakeRuntime:
         self.device_max_upload_bytes = 10 * 1024 * 1024
         self.knowledge_sync = None
         self.knowledge_outbox = None
+        self.audio_devices = MagicMock()
+        self.audio_devices.status = AudioDeviceStatus(
+            capture_available=True,
+            playback_available=False,
+            capture_name="USB Microphone",
+            playback_name=None,
+            error=None,
+        )
         self.aclose = AsyncMock()
 
 
@@ -705,6 +714,13 @@ def test_ready_endpoint_reports_local_background_health():
             "session_cleanup": "ok",
             "knowledge_sync": "disabled",
             "knowledge_outbox": "disabled",
+        },
+        "local_audio": {
+            "capture_available": True,
+            "playback_available": False,
+            "capture_name": "USB Microphone",
+            "playback_name": None,
+            "error": None,
         },
     }
 

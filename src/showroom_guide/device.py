@@ -61,6 +61,7 @@ def validate_wav(audio: bytes) -> None:
             sample_width = source.getsampwidth()
             sample_rate = source.getframerate()
             compression = source.getcomptype()
+            frame_count = source.getnframes()
     except (EOFError, wave.Error) as error:
         message = "WAV 必须使用 PCM 编码" if b"fmt " in audio else "WAV 文件已损坏"
         raise InvalidWavFormat(message) from error
@@ -73,6 +74,8 @@ def validate_wav(audio: bytes) -> None:
         raise InvalidWavFormat("WAV 必须为 16-bit")
     if sample_rate != 16000:
         raise InvalidWavFormat("WAV 采样率必须为 16 kHz")
+    if frame_count == 0:
+        raise InvalidWavFormat("WAV 文件没有音频帧")
 
 
 def inspect_wav(audio: bytes) -> WavMetrics:

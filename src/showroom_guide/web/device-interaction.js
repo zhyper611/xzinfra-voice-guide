@@ -6,6 +6,16 @@
     root.ShowroomDeviceInteraction = api;
   }
 }(typeof globalThis === "undefined" ? this : globalThis, () => {
+  function resolveAudioAvailability(snapshot) {
+    if (!snapshot.capture_available) {
+      return { ready: false, message: snapshot.audio_device_error || "未检测到可用麦克风" };
+    }
+    if (!snapshot.playback_available) {
+      return { ready: false, message: snapshot.audio_device_error || "未检测到可用扬声器" };
+    }
+    return { ready: true, message: "麦克风和扬声器已就绪" };
+  }
+
   function bindUnifiedPress({ button, releaseTarget, gesture }) {
     let activeInput = null;
 
@@ -286,6 +296,7 @@
 
   return {
     bindUnifiedPress,
+    resolveAudioAvailability,
     captureKnowledgeEntry,
     createKnowledgeDraftSourceStore,
     createRequestEpoch,

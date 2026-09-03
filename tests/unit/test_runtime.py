@@ -256,6 +256,8 @@ async def test_runtime_builds_isolated_device_with_shared_clients_and_gates():
     assert runtime.local_device._min_recording_dbfs == -45.0
     assert runtime.device._controller._playback_timeout_seconds == 300.0
     assert runtime.device._controller._xzkb_total_timeout_seconds == 120.0
+    assert runtime.device._controller._answer_max_chars == 220
+    assert runtime.device._controller._tts_audio_max_bytes == 8 * 1024 * 1024
     assert runtime.local_device._audio._no_speech_prompt[:4] == b"RIFF"
     assert runtime.button_workflow is None
     assert runtime.knowledge_outbox is None

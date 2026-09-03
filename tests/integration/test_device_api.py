@@ -11,6 +11,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from showroom_guide.controller import GuideServiceUnavailable, QuestionInProgress
+from showroom_guide.audio_devices import AudioDeviceStatus
 from showroom_guide.device import (
     DeviceTranscriptionUnavailable,
     DeviceTurnResult,
@@ -85,6 +86,14 @@ class FakeRuntime:
         self.local_device.reset = AsyncMock()
         self.local_device.replay_last_recording = AsyncMock()
         self.local_device.has_last_recording = False
+        self.audio_devices = MagicMock()
+        self.audio_devices.status = AudioDeviceStatus(
+            capture_available=True,
+            playback_available=False,
+            capture_name="USB Microphone",
+            playback_name=None,
+            error=None,
+        )
         self.device_api_key = SecretStr(DEVICE_KEY)
         self.device_max_upload_bytes = 1024
         self.cleanup_seconds = 60.0
@@ -156,6 +165,10 @@ def test_device_state_returns_snapshot():
     assert response.json()["phase"] == "transcribing"
     assert response.json()["transcript"] == "问题"
     assert response.json()["has_last_recording"] is True
+    assert response.json()["capture_available"] is True
+    assert response.json()["playback_available"] is False
+    assert response.json()["capture_name"] == "USB Microphone"
+    assert response.json()["playback_name"] is None
 
 
 def test_device_recording_is_rejected_during_knowledge_mode():

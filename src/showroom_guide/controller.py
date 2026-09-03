@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 import httpx
 
+from showroom_guide.answer_text import limit_spoken_answer
 from showroom_guide.clients.xzkb import XzkbStreamMilestone
 from showroom_guide.concurrency import AsyncGate, QueueWaitTimeout
 from showroom_guide.faq_cache import FaqCache
@@ -58,6 +59,8 @@ class GuideController:
         prepared_audio: PreparedAudioStore | None = None,
         playback_timeout_seconds: float = 300.0,
         xzkb_total_timeout_seconds: float = 120.0,
+        answer_max_chars: int = 220,
+        tts_audio_max_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         self._state: GuideStateStore = state
         self._xzkb = xzkb
@@ -68,6 +71,8 @@ class GuideController:
         self._prepared_audio = prepared_audio
         self._playback_timeout_seconds = playback_timeout_seconds
         self._xzkb_total_timeout_seconds = xzkb_total_timeout_seconds
+        self._answer_max_chars = answer_max_chars
+        self._tts_audio_max_bytes = tts_audio_max_bytes
         self._playback_timeout_handle: asyncio.TimerHandle | None = None
         self._playback_generation = 0
         self._messages: list[dict[str, str]] = []
@@ -119,7 +124,10 @@ class GuideController:
             cached_entry = self._faq_cache.match(question)
             if cached_entry is not None:
                 await self._state.set_message("正在准备讲解内容")
-                answer = cached_entry.answer
+                answer = limit_spoken_answer(
+                    cached_entry.answer,
+                    max_chars=self._answer_max_chars,
+                )
                 await self._state.set_answer(answer)
                 self._remember_exchange(question, answer)
                 prepared_audio = (
@@ -211,6 +219,12 @@ class GuideController:
             await self._degrade("知识库没有返回有效答案，请换一种问法")
             raise GuideServiceUnavailable("xzkb")
 
+        answer = limit_spoken_answer(
+            answer,
+            max_chars=self._answer_max_chars,
+        )
+        await self._state.set_answer(answer)
+
         self._remember_exchange(question, answer)
         return await self._synthesize_answer(answer, timing)
 
@@ -271,6 +285,8 @@ class GuideController:
                 if timing is not None:
                     timing.start_tts_synthesis()
                 audio = await self._speech_client.synthesize(answer)
+                if len(audio) > self._tts_audio_max_bytes:
+                    raise ValueError("TTS audio exceeds configured limit")
         except QueueWaitTimeout as error:
             if timing is not None:
                 timing.finish_tts_queue()

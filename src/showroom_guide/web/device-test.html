@@ -7,11 +7,11 @@
   <title>树莓派语音链路测试 · 新智惠想</title>
   <link rel="icon" href="/static/xzinfra-logo.svg">
   <link rel="stylesheet" href="/static/device-test.css?v=20260824">
-  <script src="/static/press-gesture.js?v=20260824" defer></script>
-  <script src="/static/device-interaction.js?v=20260824" defer></script>
+  <script src="/static/press-gesture.js?v=20260902" defer></script>
+  <script src="/static/device-interaction.js?v=20260902" defer></script>
   <script src="/static/browser-recorder.js?v=20260902" defer></script>
-  <script src="/static/servo-simulator.js?v=20260901" defer></script>
-  <script src="/static/device-test.js?v=20260824" defer></script>
+  <script src="/static/servo-simulator.js?v=20260902" defer></script>
+  <script src="/static/device-test.js?v=20260902" defer></script>
 </head>
 <body>
   <header class="brand-bar">
@@ -63,7 +63,7 @@
               <span id="unified-action-label">短按开始对话</span>
             </button>
             <p id="gesture-hint">短按录音，长按 1.5 秒切换模式</p>
-            <p class="device-route" id="device-route">树莓派采集麦克风，回答从默认扬声器播放。</p>
+            <p class="device-route" id="audio-device-status" aria-live="polite">正在检测麦克风和扬声器。</p>
           </section>
 
           <section class="verdict-panel" id="verdict-context" aria-label="是非判断详情" hidden>

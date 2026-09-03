@@ -88,6 +88,7 @@ class LocalDeviceWorkflow:
             try:
                 if self._before_recording is not None:
                     await self._before_recording()
+                await self._audio.ensure_ready_for_recording()
                 await self._play_cue_safely(
                     self._audio.play_start_cue,
                     "start",
@@ -209,8 +210,6 @@ class LocalDeviceWorkflow:
                 raise RecordingTooShort(
                     "录音时间太短，请听到开始提示音后再说话。"
                 )
-            if metrics.dbfs < self._min_recording_dbfs:
-                raise NoSpeechDetected(NO_SPEECH_MESSAGE)
         except NoSpeechDetected as error:
             await self._wait_for_cue(cue_task)
             await self._session.fail_recording(str(error))
