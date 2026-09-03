@@ -14,7 +14,7 @@ const {
   resolveKnowledgeDraftTransition,
   resolveAudioAvailability,
   resolveFrontendModeSwitch,
-  requiresLocalAudio,
+  shouldDisableUnifiedAction,
 } = require("../../src/showroom_guide/web/device-interaction.js");
 
 test("local dialogue requires both microphone and speaker", () => {
@@ -44,21 +44,26 @@ test("local dialogue requires both microphone and speaker", () => {
   });
 });
 
-test("browser verdict mode does not require Raspberry Pi audio devices", () => {
-  assert.equal(requiresLocalAudio({
-    frontendMode: "verdict",
-    knowledgeMode: "inactive",
-    phase: "idle",
+test("offline audio does not disable an available unified action", () => {
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: true,
+    hasShortAction: true,
+    hasLongAction: false,
   }), false);
-  assert.equal(requiresLocalAudio({
-    frontendMode: "conversation",
-    knowledgeMode: "inactive",
-    phase: "idle",
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: true,
+    hasShortAction: false,
+    hasLongAction: true,
+  }), false);
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: false,
+    hasShortAction: true,
+    hasLongAction: true,
   }), true);
-  assert.equal(requiresLocalAudio({
-    frontendMode: "knowledge",
-    knowledgeMode: "ready",
-    phase: "idle",
+  assert.equal(shouldDisableUnifiedAction({
+    keyReady: true,
+    hasShortAction: false,
+    hasLongAction: false,
   }), true);
 });
 

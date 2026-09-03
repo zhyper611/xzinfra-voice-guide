@@ -16,12 +16,8 @@
     return { ready: true, message: "麦克风和扬声器已就绪" };
   }
 
-  function requiresLocalAudio({ frontendMode, knowledgeMode, phase }) {
-    if (frontendMode === "verdict") return false;
-    return (
-      (knowledgeMode === "inactive" && phase !== "recording")
-      || knowledgeMode === "ready"
-    );
+  function shouldDisableUnifiedAction({ keyReady, hasShortAction, hasLongAction }) {
+    return !keyReady || (!hasShortAction && !hasLongAction);
   }
 
   function resolveFrontendModeSwitch({ targetMode, knowledgeMode, ownsKnowledge }) {
@@ -313,7 +309,7 @@
     bindUnifiedPress,
     resolveAudioAvailability,
     resolveFrontendModeSwitch,
-    requiresLocalAudio,
+    shouldDisableUnifiedAction,
     captureKnowledgeEntry,
     createKnowledgeDraftSourceStore,
     createRequestEpoch,

@@ -525,16 +525,11 @@ function updateUnifiedAction() {
   if (knowledgeActive) frontendMode = "knowledge";
   else if (frontendMode === "knowledge") frontendMode = "conversation";
   const keyReady = Boolean(deviceKey.value.trim());
-  const requiresAudio = ShowroomDeviceInteraction.requiresLocalAudio({
-    frontendMode,
-    knowledgeMode: mode,
-    phase: currentPhase,
+  const disabled = ShowroomDeviceInteraction.shouldDisableUnifiedAction({
+    keyReady,
+    hasShortAction: Boolean(action.short),
+    hasLongAction: Boolean(action.long),
   });
-  const disabled = (
-    !keyReady
-    || (!action.short && !action.long)
-    || (requiresAudio && !audioAvailability.ready)
-  );
 
   unifiedActionLabel.textContent = action.label;
   unifiedAction.dataset.state = knowledgeActive ? mode : currentPhase;
