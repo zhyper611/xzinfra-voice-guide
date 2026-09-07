@@ -28,6 +28,32 @@
     };
   }
 
+  function buildMotionTimings({
+    yesAngle = ANGLES.yes,
+    neutralAngle = ANGLES.neutral,
+    noAngle = ANGLES.no,
+    windupOffset = 20,
+    thinkingMilliseconds = 1600,
+  } = {}) {
+    const motionAngles = buildMotionAngles({
+      yesAngle,
+      neutralAngle,
+      noAngle,
+      windupOffset,
+    });
+    const thinkingDistance = Math.abs(noAngle - yesAngle);
+    const windupDuration = angle => thinkingDistance === 0
+      ? 0
+      : thinkingMilliseconds * Math.abs(angle - neutralAngle) / thinkingDistance;
+    return {
+      thinking: thinkingMilliseconds,
+      windup: {
+        yes: windupDuration(motionAngles.windup.yes),
+        no: windupDuration(motionAngles.windup.no),
+      },
+    };
+  }
+
   function angleToRotation(angle) {
     return -135 + ((angle - ANGLES.yes) * 90 / (ANGLES.no - ANGLES.yes));
   }
@@ -35,7 +61,8 @@
   function create({
     render = () => {},
     sleep = defaultSleep,
-    windupMilliseconds = 360,
+    windupMilliseconds = null,
+    thinkingMilliseconds = 1600,
     decisiveMilliseconds = 140,
     yesAngle = ANGLES.yes,
     neutralAngle = ANGLES.neutral,
@@ -47,6 +74,15 @@
       neutralAngle,
       noAngle,
     });
+    const motionTimings = buildMotionTimings({
+      yesAngle,
+      neutralAngle,
+      noAngle,
+      thinkingMilliseconds,
+    });
+    const windupTimings = windupMilliseconds === null
+      ? motionTimings.windup
+      : { yes: windupMilliseconds, no: windupMilliseconds };
     let mode = "follow";
     let phase = "idle";
     let verdict = "neutral";
@@ -98,7 +134,7 @@
       verdict = "neutral";
       angle = motionAngles.windup[target];
       emit("windup");
-      await sleep(windupMilliseconds);
+      await sleep(windupTimings[target]);
       if (destroyed || current !== operation) return;
       phase = "decisive";
       verdict = target;
@@ -162,6 +198,13 @@
     const phaseOutput = find("#servo-phase-output");
     const buttons = [...root.querySelectorAll("[data-servo-verdict]")];
     const motionAngles = buildMotionAngles(createOptions);
+    const motionTimings = buildMotionTimings(createOptions);
+    const windupTimings = createOptions.windupMilliseconds == null
+      ? motionTimings.windup
+      : {
+          yes: createOptions.windupMilliseconds,
+          no: createOptions.windupMilliseconds,
+        };
     stage.style.setProperty(
       "--servo-thinking-yes-rotation",
       `${angleToRotation(motionAngles.thinking[0])}deg`,
@@ -169,6 +212,10 @@
     stage.style.setProperty(
       "--servo-thinking-no-rotation",
       `${angleToRotation(motionAngles.thinking[1])}deg`,
+    );
+    stage.style.setProperty(
+      "--servo-thinking-duration",
+      `${motionTimings.thinking}ms`,
     );
     const listeners = [];
     const listen = (node, type, callback) => {
@@ -178,6 +225,13 @@
     const controller = create({
       ...createOptions,
       render(snapshot) {
+        if (snapshot.phase === "windup") {
+          const target = snapshot.angle === motionAngles.windup.yes ? "yes" : "no";
+          stage.style.setProperty(
+            "--servo-windup-duration",
+            `${windupTimings[target]}ms`,
+          );
+        }
         stage.style.setProperty("--servo-angle", String(snapshot.angle));
         stage.dataset.phase = snapshot.phase;
         output.textContent = LABELS[snapshot.verdict];
@@ -209,5 +263,5 @@
     return controller;
   }
 
-  return { create, bind, buildMotionAngles };
+  return { create, bind, buildMotionAngles, buildMotionTimings };
 }));

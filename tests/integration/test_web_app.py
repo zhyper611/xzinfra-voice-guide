@@ -298,6 +298,9 @@ def test_device_styles_define_stable_responsive_servo_stage():
     assert "--servo-angle" in css
     assert "--servo-thinking-yes-rotation" in css
     assert "--servo-thinking-no-rotation" in css
+    assert "animation: servo-thinking var(--servo-thinking-duration, 1600ms)" in css
+    assert "transition-duration: var(--servo-windup-duration, 291ms)" in css
+    assert "transition-timing-function: ease-in-out" in css
     assert "@media (max-width: 760px)" in css
 
 

@@ -1444,10 +1444,13 @@ button:disabled {
 }
 
 .servo-stage[data-phase="thinking"] .servo-arm {
-  animation: servo-thinking 1.6s ease-in-out infinite alternate;
+  animation: servo-thinking var(--servo-thinking-duration, 1600ms) ease-in-out infinite alternate;
 }
 
-.servo-stage[data-phase="windup"] .servo-arm { transition-duration: 360ms; }
+.servo-stage[data-phase="windup"] .servo-arm {
+  transition-duration: var(--servo-windup-duration, 291ms);
+  transition-timing-function: ease-in-out;
+}
 
 .servo-stage[data-phase="decisive"] .servo-arm {
   transition-duration: 140ms;

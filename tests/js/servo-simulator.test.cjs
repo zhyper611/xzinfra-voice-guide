@@ -34,6 +34,63 @@ test("motion angles use full thinking range and clamp custom windup", () => {
   });
 });
 
+test("windup timing preserves the thinking angular speed", () => {
+  const defaults = ServoSimulator.buildMotionTimings();
+  assert.ok(Math.abs(defaults.windup.yes - (1600 * 20 / 110)) < 0.001);
+  assert.ok(Math.abs(defaults.windup.no - (1600 * 20 / 110)) < 0.001);
+
+  const custom = ServoSimulator.buildMotionTimings({
+    yesAngle: 40,
+    neutralAngle: 50,
+    noAngle: 80,
+    thinkingMilliseconds: 1600,
+  });
+  assert.equal(custom.windup.yes, 800);
+  assert.equal(custom.windup.no, 400);
+});
+
+test("verdict keeps the decisive timing while using dynamic windup timing", async () => {
+  const sleeps = [];
+  const simulator = ServoSimulator.create({
+    sleep: async milliseconds => sleeps.push(milliseconds),
+  });
+
+  await simulator.showVerdict("yes");
+
+  assert.ok(Math.abs(sleeps[0] - (1600 * 20 / 110)) < 0.001);
+  assert.equal(sleeps[1], 140);
+});
+
+test("binding shares motion timing with CSS", async () => {
+  const properties = new Map();
+  const makeNode = () => ({
+    style: { setProperty: (name, value) => properties.set(name, value) },
+    dataset: {},
+    setAttribute: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  });
+  const nodes = {
+    ".servo-stage": makeNode(),
+    "#servo-mode-follow": makeNode(),
+    "#servo-mode-preview": makeNode(),
+    "#servo-verdict-output": makeNode(),
+    "#servo-phase-output": makeNode(),
+  };
+  const root = {
+    querySelector: selector => nodes[selector] ?? null,
+    querySelectorAll: () => [],
+  };
+  const controller = ServoSimulator.bind(root, {
+    createOptions: { sleep: async () => {} },
+  });
+
+  assert.equal(properties.get("--servo-thinking-duration"), "1600ms");
+  await controller.showVerdict("yes");
+  const windup = Number.parseFloat(properties.get("--servo-windup-duration"));
+  assert.ok(Math.abs(windup - (1600 * 20 / 110)) < 0.001);
+});
+
 test("preview mode ignores session updates until follow resumes", async () => {
   const simulator = ServoSimulator.create({ sleep: async () => {} });
   simulator.setMode("preview");
