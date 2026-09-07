@@ -14,8 +14,21 @@ const {
   resolveKnowledgeDraftTransition,
   resolveAudioAvailability,
   resolveFrontendModeSwitch,
+  resolveVerdictReason,
   shouldDisableUnifiedAction,
 } = require("../../src/showroom_guide/web/device-interaction.js");
+
+test("verdict reason distinguishes idle, returned, and missing content", () => {
+  assert.equal(resolveVerdictReason({ verdictPhase: "idle", reason: "" }), "等待提问");
+  assert.equal(resolveVerdictReason({
+    verdictPhase: "holding",
+    reason: "  知识库明确支持  ",
+  }), "知识库明确支持");
+  assert.equal(resolveVerdictReason({
+    verdictPhase: "holding",
+    reason: "",
+  }), "暂未获得判断理由");
+});
 
 test("local dialogue requires both microphone and speaker", () => {
   assert.deepEqual(resolveAudioAvailability({

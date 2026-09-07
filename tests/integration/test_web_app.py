@@ -265,6 +265,7 @@ def test_device_page_exposes_servo_simulator_controls():
     with TestClient(create_app(runtime)) as client:
         html = client.get("/device-test").text
         script = client.get("/static/servo-simulator.js")
+        page_script = client.get("/static/device-test.js").text
 
     required_ids = [
         "servo-simulator",
@@ -283,6 +284,15 @@ def test_device_page_exposes_servo_simulator_controls():
     assert 'aria-labelledby="servo-simulator-title"' in html
     assert script.status_code == 200
     assert "javascript" in script.headers["content-type"]
+    verdict_start = html.index('id="verdict-context"')
+    verdict_end = html.index("</section>", verdict_start)
+    result_start = html.index('class="result-panel"')
+    result_end = html.index("</section>", result_start)
+    assert 'id="verdict-reason"' not in html[verdict_start:verdict_end]
+    assert 'id="verdict-reason-block"' in html[result_start:result_end]
+    assert 'id="verdict-reason"' in html[result_start:result_end]
+    assert 'verdictReasonBlock.hidden = frontendMode !== "verdict"' in page_script
+    assert "ShowroomDeviceInteraction.resolveVerdictReason" in page_script
 
 
 def test_device_styles_define_stable_responsive_servo_stage():

@@ -73,7 +73,6 @@
               <div><span>依据</span><strong id="verdict-basis">--</strong></div>
               <div><span>耗时</span><strong id="verdict-elapsed">--</strong></div>
             </div>
-            <div class="verdict-detail"><span>判断理由</span><output id="verdict-reason">等待提问</output></div>
             <div class="verdict-detail"><span>知识依据</span><output id="verdict-evidence">--</output></div>
           </section>
 
@@ -149,6 +148,10 @@
 
         <div class="result-block"><p>ASR 识别文本</p><div id="transcript" aria-live="polite">尚未识别</div></div>
         <div class="result-block answer-block"><p id="answer-label">知识库回答</p><div id="answer" aria-live="polite">回答会显示在这里</div></div>
+        <div class="verdict-result-reason" id="verdict-reason-block" hidden>
+          <p>判断理由</p>
+          <output id="verdict-reason" aria-live="polite">等待提问</output>
+        </div>
         <div class="audio-block">
           <div><p id="audio-label">TTS 合成语音</p><span id="audio-hint">语音生成后可播放</span></div>
           <audio id="device-audio" controls preload="none" hidden></audio>

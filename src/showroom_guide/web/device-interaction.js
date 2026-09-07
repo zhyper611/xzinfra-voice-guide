@@ -20,6 +20,12 @@
     return !keyReady || (!hasShortAction && !hasLongAction);
   }
 
+  function resolveVerdictReason({ verdictPhase, reason }) {
+    if (verdictPhase === "idle") return "等待提问";
+    const normalized = typeof reason === "string" ? reason.trim() : "";
+    return normalized || "暂未获得判断理由";
+  }
+
   function resolveFrontendModeSwitch({ targetMode, knowledgeMode, ownsKnowledge }) {
     if (!new Set(["conversation", "verdict"]).has(targetMode)) return "blocked";
     if (knowledgeMode === "inactive") return "direct";
@@ -309,6 +315,7 @@
     bindUnifiedPress,
     resolveAudioAvailability,
     resolveFrontendModeSwitch,
+    resolveVerdictReason,
     shouldDisableUnifiedAction,
     captureKnowledgeEntry,
     createKnowledgeDraftSourceStore,

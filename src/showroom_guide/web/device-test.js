@@ -36,6 +36,7 @@ const statusMessage = document.querySelector("#status-message");
 const transcript = document.querySelector("#transcript");
 const answer = document.querySelector("#answer");
 const answerLabel = document.querySelector("#answer-label");
+const verdictReasonBlock = document.querySelector("#verdict-reason-block");
 const audio = document.querySelector("#device-audio");
 const audioLabel = document.querySelector("#audio-label");
 const audioHint = document.querySelector("#audio-hint");
@@ -553,6 +554,7 @@ function updateUnifiedAction() {
   audioLabel.textContent = frontendMode === "verdict" ? "语音输出" : "TTS 合成语音";
   knowledgeContext.hidden = !(knowledgeActive || knowledgeEntryId);
   verdictContext.hidden = frontendMode !== "verdict";
+  verdictReasonBlock.hidden = frontendMode !== "verdict";
   modeConversation.setAttribute("aria-pressed", String(frontendMode === "conversation"));
   modeVerdict.setAttribute("aria-pressed", String(frontendMode === "verdict"));
   modeKnowledge.setAttribute("aria-pressed", String(frontendMode === "knowledge"));
@@ -687,7 +689,10 @@ async function renderVerdictState(snapshot) {
   audioHint.textContent = "是非模式不生成语音回答";
   verdictScope.textContent = verdictScopeLabels[snapshot.verdict_scope] || "--";
   verdictBasis.textContent = verdictBasisLabels[snapshot.verdict_basis] || "--";
-  verdictReason.textContent = snapshot.verdict_reason || "等待提问";
+  verdictReason.textContent = ShowroomDeviceInteraction.resolveVerdictReason({
+    verdictPhase: snapshot.verdict_phase,
+    reason: snapshot.verdict_reason,
+  });
   verdictEvidence.textContent = snapshot.verdict_evidence || "--";
   verdictElapsed.textContent = Number.isFinite(snapshot.verdict_elapsed_ms)
     ? `${Math.round(snapshot.verdict_elapsed_ms)} ms`
