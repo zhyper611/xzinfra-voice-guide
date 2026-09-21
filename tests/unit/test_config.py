@@ -77,7 +77,7 @@ def test_verdict_defaults_to_disabled():
     assert settings.verdict_enabled is False
     assert settings.verdict_base_url is None
     assert settings.verdict_api_key is None
-    assert settings.verdict_timeout_seconds == 15.0
+    assert settings.verdict_timeout_seconds == 30.0
 
 
 @pytest.mark.parametrize(

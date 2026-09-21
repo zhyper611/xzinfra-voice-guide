@@ -131,6 +131,51 @@ async def test_client_failure_degrades_to_neutral_without_escaping():
 
 
 @pytest.mark.asyncio
+async def test_failure_prompt_uses_configured_tts_voice_before_local_fallback():
+    spoken = []
+    prompts = []
+    decision = VerdictDecision.mixed(
+        scope=VerdictScope.INVALID,
+        verdict=Verdict.NEUTRAL,
+        basis=VerdictBasis.NONE,
+        reason="不是是非问题",
+        failure=VerdictFailure.INVALID_QUESTION,
+    )
+    workflow = VerdictWorkflow(
+        FakeClient(decision),
+        FakeMotion(),
+        GuideStateStore(),
+        speak_prompt=lambda text: spoken.append(text),
+        play_prompt=lambda name: prompts.append(name),
+    )
+
+    await workflow.run("介绍一下展厅")
+
+    assert spoken == ["这个问题不适合进行是非判断，我先保持中立。"]
+    assert prompts == []
+
+
+@pytest.mark.asyncio
+async def test_failure_prompt_falls_back_to_local_audio_when_tts_fails():
+    prompts = []
+
+    async def failing_speech(_text):
+        raise RuntimeError("tts unavailable")
+
+    workflow = VerdictWorkflow(
+        FakeClient(error=VerdictClientError("unavailable")),
+        FakeMotion(),
+        GuideStateStore(),
+        speak_prompt=failing_speech,
+        play_prompt=lambda name: prompts.append(name),
+    )
+
+    await workflow.run("今天适合散步吗？")
+
+    assert prompts == ["verdict-unavailable"]
+
+
+@pytest.mark.asyncio
 async def test_hard_timeout_stops_thinking_and_degrades():
     client = DeferredClient()
     motion = FakeMotion()

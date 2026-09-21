@@ -472,12 +472,18 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
     )
     verdict_workflow = None
     if verdict_client is not None:
+        async def speak_verdict_prompt(text: str) -> None:
+            audio = await speech.synthesize(text)
+            await local_audio.play(audio)
+
         verdict_workflow = VerdictWorkflow(
             verdict_client,
             servo_motion or WebSimulationOutput(device_state),
             device_state,
             play_prompt=local_audio.play_prompt,
+            speak_prompt=speak_verdict_prompt,
             timeout_seconds=configured.verdict_timeout_seconds,
+            speech_timeout_seconds=configured.tts_timeout_seconds + 10,
         )
     device = DeviceVoiceSession(
         state=device_state,

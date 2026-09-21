@@ -26,10 +26,22 @@ class VerdictInProgress(RuntimeError):
 
 
 _PROMPTS = {
-    VerdictFailure.INVALID_QUESTION: "verdict-invalid",
-    VerdictFailure.INSUFFICIENT_EVIDENCE: "verdict-insufficient-evidence",
-    VerdictFailure.HIGH_RISK: "verdict-high-risk",
-    VerdictFailure.SERVICE_FAILURE: "verdict-unavailable",
+    VerdictFailure.INVALID_QUESTION: (
+        "verdict-invalid",
+        "这个问题不适合进行是非判断，我先保持中立。",
+    ),
+    VerdictFailure.INSUFFICIENT_EVIDENCE: (
+        "verdict-insufficient-evidence",
+        "知识库依据不足，我先保持中立。",
+    ),
+    VerdictFailure.HIGH_RISK: (
+        "verdict-high-risk",
+        "这个问题风险较高，不适合进行是非判断，我先保持中立。",
+    ),
+    VerdictFailure.SERVICE_FAILURE: (
+        "verdict-unavailable",
+        "判断服务暂时不可用，我先保持中立。",
+    ),
 }
 
 
@@ -41,16 +53,20 @@ class VerdictWorkflow:
         state: GuideStateStore,
         *,
         play_prompt: Callable[[str], object] | None = None,
-        timeout_seconds: float = 15.0,
+        speak_prompt: Callable[[str], object] | None = None,
+        timeout_seconds: float = 30.0,
         prompt_timeout_seconds: float = 5.0,
+        speech_timeout_seconds: float = 20.0,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._client = client
         self._motion = motion
         self._state = state
         self._play_prompt = play_prompt
+        self._speak_prompt = speak_prompt
         self._timeout_seconds = timeout_seconds
         self._prompt_timeout_seconds = prompt_timeout_seconds
+        self._speech_timeout_seconds = speech_timeout_seconds
         self._clock = clock
         self._generation = 0
         self._run_lock = asyncio.Lock()
@@ -86,7 +102,13 @@ class VerdictWorkflow:
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 decision = await self._client.decide(question)
-        except (TimeoutError, VerdictClientError):
+        except TimeoutError:
+            logger.warning(
+                "verdict_workflow_timeout timeout_seconds=%s",
+                self._timeout_seconds,
+            )
+            decision = VerdictDecision.service_failure()
+        except VerdictClientError:
             decision = VerdictDecision.service_failure()
         if generation != self._generation:
             raise asyncio.CancelledError
@@ -129,9 +151,23 @@ class VerdictWorkflow:
         self,
         failure: VerdictFailure | None,
     ) -> None:
-        if failure is None or self._play_prompt is None:
+        if failure is None:
             return
-        prompt = _PROMPTS[failure]
+        prompt, text = _PROMPTS[failure]
+        if self._speak_prompt is not None:
+            try:
+                result = self._speak_prompt(text)
+                if inspect.isawaitable(result):
+                    async with asyncio.timeout(self._speech_timeout_seconds):
+                        await result
+                return
+            except Exception:
+                logger.exception(
+                    "verdict_tts_playback_failed prompt=%s",
+                    prompt,
+                )
+        if self._play_prompt is None:
+            return
         try:
             result = self._play_prompt(prompt)
             if inspect.isawaitable(result):

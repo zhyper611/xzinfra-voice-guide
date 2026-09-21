@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -10,12 +11,15 @@ from showroom_guide.verdict import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class VerdictClient:
     def __init__(
         self,
         base_url: str,
         api_key: str,
-        timeout: float = 15.0,
+        timeout: float = 30.0,
     ) -> None:
         self._url = (
             f"{base_url.rstrip('/')}"
@@ -46,7 +50,23 @@ class VerdictClient:
             response.raise_for_status()
             content = self._response_content(response.json())
             return validate_decision(json.loads(content))
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+        except httpx.HTTPError as error:
+            status = (
+                error.response.status_code
+                if isinstance(error, httpx.HTTPStatusError)
+                else None
+            )
+            logger.warning(
+                "verdict_request_failed error=%s status=%s",
+                type(error).__name__,
+                status,
+            )
+            raise VerdictClientError("判断应用请求失败") from error
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            logger.warning(
+                "verdict_response_invalid error=%s",
+                type(error).__name__,
+            )
             raise VerdictClientError("判断应用返回无效响应") from error
 
     @staticmethod

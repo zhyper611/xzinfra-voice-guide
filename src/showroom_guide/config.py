@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     verdict_enabled: bool = False
     verdict_base_url: str | None = None
     verdict_api_key: SecretStr | None = None
-    verdict_timeout_seconds: float = Field(default=15.0, gt=0.0)
+    verdict_timeout_seconds: float = Field(default=30.0, gt=0.0)
     knowledge_capture_enabled: bool = False
     xzkb_username: str | None = Field(default=None, min_length=1)
     xzkb_password: SecretStr | None = None

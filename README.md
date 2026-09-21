@@ -94,7 +94,7 @@ chmod 600 .env
 | `GUIDE_VERDICT_ENABLED` | 是否启用独立是非判断模式 |
 | `GUIDE_VERDICT_BASE_URL` | XZKB 判断应用所在服务根地址 |
 | `GUIDE_VERDICT_API_KEY` | 独立判断应用 API Key，不使用知识补充登录 Token |
-| `GUIDE_VERDICT_TIMEOUT_SECONDS` | 单轮判断应用硬超时，默认 15 秒 |
+| `GUIDE_VERDICT_TIMEOUT_SECONDS` | 单轮判断应用硬超时，默认 30 秒 |
 | `GUIDE_KNOWLEDGE_CAPTURE_ENABLED` | 是否启用知识补充；启用后必须配置下列 XZKB 专用账号和知识库 ID |
 | `GUIDE_XZKB_USERNAME` | 拥有目标知识库写入权限的 XZKB 专用本地账号 |
 | `GUIDE_XZKB_PASSWORD` | XZKB 专用账号密码；仅保存在权限为 `600` 的运行环境文件中 |
