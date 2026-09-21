@@ -447,6 +447,10 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert 'request("/api/device/verdict/turn"' in response.text
     assert 'request("/api/device/verdict/recording/start"' in response.text
     assert 'request("/api/device/verdict/recording/stop"' in response.text
+    assert (
+        'frontendMode === "verdict") await renderVerdictState(snapshot)'
+        in response.text
+    )
     assert 'request("/api/device/verdict/leave"' in response.text
     assert "if (serverVerdictModeActive)" in response.text
     assert "正在使用树莓派麦克风录音" in response.text

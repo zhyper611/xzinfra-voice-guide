@@ -906,6 +906,7 @@ async function refreshState({ showFailure = false } = {}) {
     const snapshot = await response.json();
     if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;
     if (frontendMode === "conversation") renderState(snapshot);
+    else if (frontendMode === "verdict") await renderVerdictState(snapshot);
     else hasLastRecording = Boolean(snapshot.has_last_recording);
   } catch (error) {
     if (!isCurrentDeviceKeyRequest(requestGeneration, requestKey)) return;

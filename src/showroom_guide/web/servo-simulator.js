@@ -146,10 +146,14 @@
       emit(`holding-${target}`);
     };
     const applySessionState = async (value = {}) => {
-      sessionState = {
+      const nextSessionState = {
         verdict_phase: safePhase(value.verdict_phase),
         verdict: safeVerdict(value.verdict),
       };
+      const unchanged = nextSessionState.verdict_phase === sessionState.verdict_phase
+        && nextSessionState.verdict === sessionState.verdict;
+      sessionState = nextSessionState;
+      if (unchanged) return;
       if (mode !== "follow") return;
       if (sessionState.verdict_phase === "thinking") startThinking();
       else if (sessionState.verdict_phase === "holding") {

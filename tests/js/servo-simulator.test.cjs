@@ -101,6 +101,18 @@ test("preview mode ignores session updates until follow resumes", async () => {
   assert.equal(simulator.getSnapshot().verdict, "no");
 });
 
+test("repeated device polling does not replay the same verdict motion", async () => {
+  const simulator = ServoSimulator.create({ sleep: async () => {} });
+  const state = { verdict_phase: "holding", verdict: "no" };
+
+  await simulator.applySessionState(state);
+  const historyLength = simulator.history.length;
+  await simulator.applySessionState(state);
+
+  assert.equal(simulator.history.length, historyLength);
+  assert.equal(simulator.getSnapshot().verdict, "no");
+});
+
 test("unknown session result fails closed to neutral", async () => {
   const simulator = ServoSimulator.create({ sleep: async () => {} });
   await simulator.applySessionState({ verdict_phase: "holding", verdict: "maybe" });
