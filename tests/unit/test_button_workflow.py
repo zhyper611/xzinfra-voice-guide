@@ -384,6 +384,61 @@ async def test_verdict_mode_short_press_uses_shared_recording_device():
 
 
 @pytest.mark.asyncio
+async def test_web_verdict_recording_enters_records_stops_and_returns_to_dialogue():
+    local_device = MagicMock(is_idle=True, is_recording=False)
+    local_device.start_recording = AsyncMock()
+    local_device.stop_recording = AsyncMock()
+    verdict = MagicMock(enter=AsyncMock(), leave=AsyncMock())
+    state = GuideStateStore()
+    workflow = DeviceButtonWorkflow(
+        local_device,
+        MagicMock(),
+        verdict,
+        state=state,
+    )
+
+    await workflow.start_verdict_recording()
+
+    verdict.enter.assert_awaited_once_with()
+    local_device.start_recording.assert_awaited_once_with()
+    assert workflow.mode is ButtonInteractionMode.VERDICT
+    assert state.snapshot.interaction_mode is InteractionMode.VERDICT
+
+    local_device.is_recording = True
+    local_device.is_idle = False
+    await workflow.stop_verdict_recording()
+    local_device.stop_recording.assert_awaited_once_with()
+
+    local_device.is_recording = False
+    local_device.is_idle = True
+    await workflow.leave_verdict_mode()
+    verdict.leave.assert_awaited_once_with()
+    assert workflow.mode is ButtonInteractionMode.DIALOGUE
+    assert state.snapshot.interaction_mode is InteractionMode.CONVERSATION
+
+
+@pytest.mark.asyncio
+async def test_failed_web_verdict_recording_rolls_back_to_dialogue():
+    local_device = MagicMock(is_idle=True, is_recording=False)
+    local_device.start_recording = AsyncMock(side_effect=RuntimeError("microphone failed"))
+    verdict = MagicMock(enter=AsyncMock(), leave=AsyncMock())
+    state = GuideStateStore()
+    workflow = DeviceButtonWorkflow(
+        local_device,
+        MagicMock(),
+        verdict,
+        state=state,
+    )
+
+    with pytest.raises(RuntimeError, match="microphone failed"):
+        await workflow.start_verdict_recording()
+
+    verdict.leave.assert_awaited_once_with()
+    assert workflow.mode is ButtonInteractionMode.DIALOGUE
+    assert state.snapshot.interaction_mode is InteractionMode.CONVERSATION
+
+
+@pytest.mark.asyncio
 async def test_processing_verdict_cannot_switch_mode():
     local_device = MagicMock(is_idle=False, is_recording=False)
     knowledge = MagicMock()

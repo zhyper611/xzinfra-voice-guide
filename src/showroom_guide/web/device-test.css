@@ -1421,7 +1421,7 @@ button:disabled {
 
 .servo-mechanism {
   position: absolute;
-  left: 16%;
+  left: calc(50% - 82px);
   bottom: 20%;
   width: 55%;
   height: 50%;
@@ -1856,7 +1856,7 @@ button:disabled {
   }
 
   .servo-mechanism {
-    left: 8%;
+    left: calc(50% - 62px);
     bottom: 19%;
     transform: scale(0.76);
     transform-origin: left bottom;

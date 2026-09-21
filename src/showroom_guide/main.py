@@ -1289,6 +1289,52 @@ def create_app(runtime: Runtime) -> FastAPI:
                 ) from error
             return session.state.snapshot
 
+    def require_verdict_button_workflow() -> DeviceButtonWorkflow:
+        workflow = runtime.button_workflow
+        if workflow is None or runtime.verdict_workflow is None:
+            raise HTTPException(status_code=404, detail="是非判断功能未启用")
+        return workflow
+
+    @app.post(
+        "/api/device/verdict/recording/start",
+        response_model=GuideSnapshot,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def start_verdict_recording() -> GuideSnapshot:
+        try:
+            await require_verdict_button_workflow().start_verdict_recording()
+        except LocalAudioError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return runtime.device.snapshot
+
+    @app.post(
+        "/api/device/verdict/recording/stop",
+        response_model=GuideSnapshot,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def stop_verdict_recording() -> GuideSnapshot:
+        try:
+            await require_verdict_button_workflow().stop_verdict_recording()
+        except LocalAudioError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return runtime.device.snapshot
+
+    @app.post(
+        "/api/device/verdict/leave",
+        response_model=GuideSnapshot,
+        dependencies=[Depends(require_device_key)],
+    )
+    async def leave_verdict_mode() -> GuideSnapshot:
+        try:
+            await require_verdict_button_workflow().leave_verdict_mode()
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return runtime.device.snapshot
+
     @app.post(
         "/api/device/knowledge/acquire",
         response_model=KnowledgeAcquireResponse,

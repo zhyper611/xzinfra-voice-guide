@@ -53,6 +53,50 @@ class DeviceButtonWorkflow:
             else:
                 await self._local_device.start_recording()
 
+    async def start_verdict_recording(self) -> None:
+        async with self._lock:
+            if self._knowledge_owner is not None:
+                raise RuntimeError("知识补充模式正在被网页控制")
+            if self._verdict is None:
+                raise RuntimeError("是非判断功能未启用")
+            if self._mode is ButtonInteractionMode.KNOWLEDGE:
+                raise RuntimeError("设备当前处于知识补充模式")
+            entered_verdict = False
+            if self._mode is ButtonInteractionMode.DIALOGUE:
+                if not self._local_device.is_idle:
+                    raise RuntimeError("设备正在处理上一轮录音")
+                await self._verdict.enter()
+                await self._set_mode(ButtonInteractionMode.VERDICT)
+                entered_verdict = True
+            if self._local_device.is_recording:
+                raise RuntimeError("设备已经开始录音")
+            try:
+                await self._local_device.start_recording()
+            except BaseException:
+                if entered_verdict:
+                    try:
+                        await self._verdict.leave()
+                    finally:
+                        await self._set_mode(ButtonInteractionMode.DIALOGUE)
+                raise
+
+    async def stop_verdict_recording(self) -> None:
+        async with self._lock:
+            if self._mode is not ButtonInteractionMode.VERDICT:
+                raise RuntimeError("设备当前未处于是非判断模式")
+            if not self._local_device.is_recording:
+                raise RuntimeError("当前没有正在进行的录音")
+            await self._local_device.stop_recording()
+
+    async def leave_verdict_mode(self) -> None:
+        async with self._lock:
+            if self._mode is not ButtonInteractionMode.VERDICT:
+                return
+            if not self._local_device.is_idle:
+                raise RuntimeError("设备正在处理是非判断")
+            await self._verdict.leave()
+            await self._set_mode(ButtonInteractionMode.DIALOGUE)
+
     async def long_press(self) -> KnowledgeLongPressResult | None:
         async with self._lock:
             if self._knowledge_owner is not None:

@@ -106,6 +106,8 @@ class FakeRuntime:
         self.knowledge_web.long_press = AsyncMock()
         self.knowledge_web.release = AsyncMock()
         self.knowledge_web.entry = AsyncMock()
+        self.button_workflow = None
+        self.verdict_workflow = None
         self.aclose = AsyncMock()
 
 
@@ -122,6 +124,9 @@ def authorized_headers() -> dict[str, str]:
         ("post", "/api/device/recording/start", {}),
         ("post", "/api/device/recording/stop", {}),
         ("post", "/api/device/recording/replay", {}),
+        ("post", "/api/device/verdict/recording/start", {}),
+        ("post", "/api/device/verdict/recording/stop", {}),
+        ("post", "/api/device/verdict/leave", {}),
         ("get", "/api/device/audio/audio-id", {}),
         ("post", "/api/device/playback-finished", {}),
         ("post", "/api/device/reset", {}),
@@ -169,6 +174,27 @@ def test_device_state_returns_snapshot():
     assert response.json()["playback_available"] is False
     assert response.json()["capture_name"] == "USB Microphone"
     assert response.json()["playback_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name"),
+    [
+        ("/api/device/verdict/recording/start", "start_verdict_recording"),
+        ("/api/device/verdict/recording/stop", "stop_verdict_recording"),
+        ("/api/device/verdict/leave", "leave_verdict_mode"),
+    ],
+)
+def test_verdict_recording_routes_use_shared_device_workflow(path, method_name):
+    runtime = FakeRuntime()
+    runtime.button_workflow = MagicMock()
+    setattr(runtime.button_workflow, method_name, AsyncMock())
+    runtime.verdict_workflow = object()
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(path, headers=authorized_headers())
+
+    assert response.status_code == 200
+    getattr(runtime.button_workflow, method_name).assert_awaited_once_with()
 
 
 def test_device_recording_is_rejected_during_knowledge_mode():

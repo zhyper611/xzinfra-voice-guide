@@ -68,17 +68,11 @@ const verdictEvidence = document.querySelector("#verdict-evidence");
 const verdictElapsed = document.querySelector("#verdict-elapsed");
 const servoSimulatorRoot = document.querySelector("#servo-simulator");
 let servoSimulator = null;
-let browserRecorder = null;
 
 try {
   servoSimulator = ShowroomServoSimulator.bind(servoSimulatorRoot);
 } catch (error) {
   console.error("servo_simulator_initialization_failed", error);
-}
-try {
-  browserRecorder = ShowroomBrowserRecorder.create();
-} catch (error) {
-  console.error("browser_recorder_initialization_failed", error);
 }
 const audioDeviceStatus = document.querySelector("#audio-device-status");
 
@@ -111,6 +105,7 @@ let metricsRequestId = 0;
 let operationPending = false;
 let currentPhase = "idle";
 let frontendMode = "conversation";
+let serverVerdictModeActive = false;
 let dialogueSource = "microphone";
 let wavPurpose = "dialogue";
 let localPlaybackActive = false;
@@ -497,7 +492,7 @@ function getUnifiedAction() {
     return { short: knowledgeShort, long: knowledgeLong, label: "长按保存并返回" };
   }
   if (frontendMode === "verdict") {
-    if (browserRecorder?.isRecording) {
+    if (currentPhase === "recording") {
       return { short: runVerdictShortPress, long: null, label: "短按停止并判断" };
     }
     return {
@@ -542,11 +537,11 @@ function updateUnifiedAction() {
     ? (knowledgeStageLabels[knowledgeSnapshot?.processing_stage]
       || knowledgeModeLabels[mode]
       || "待机")
-    : (frontendMode === "verdict" && browserRecorder?.isRecording
-      ? "浏览器录音"
+    : (frontendMode === "verdict" && currentPhase === "recording"
+      ? "树莓派录音"
       : (phaseLabels[currentPhase] || "处理中"));
   deviceRoute.textContent = frontendMode === "verdict"
-    ? "浏览器采集麦克风，仅在本页模拟机械判断。"
+    ? "树莓派采集麦克风，本页同步模拟机械判断。"
     : (frontendMode === "knowledge"
       ? "树莓派采集麦克风，复述确认后写入知识库。"
       : "树莓派采集麦克风，回答从默认扬声器播放。");
@@ -648,6 +643,7 @@ function handleKnowledgeError(error, { showFailure = true, captureEntry = false 
 function renderState(snapshot) {
   audioAvailability = ShowroomDeviceInteraction.resolveAudioAvailability(snapshot);
   audioDeviceStatus.textContent = audioAvailability.message;
+  serverVerdictModeActive = snapshot.interaction_mode === "verdict";
   currentPhase = snapshot.phase || "idle";
   hasLastRecording = Boolean(snapshot.has_last_recording);
   phasePill.dataset.phase = currentPhase;
@@ -1270,6 +1266,10 @@ async function acquireKnowledgeControl() {
   beginKnowledgeMutation();
   let acquired = false;
   try {
+    if (serverVerdictModeActive) {
+      await request("/api/device/verdict/leave", { method: "POST" });
+      serverVerdictModeActive = false;
+    }
     const payload = await knowledgeRequest("/api/device/knowledge/acquire", { method: "POST" });
     persistKnowledgeLease(payload.lease_token);
     renderAuthoritativeKnowledgeState(payload.knowledge_state);
@@ -1470,26 +1470,22 @@ async function runVerdictShortPress() {
   clearError();
   try {
     requireKey();
-    if (!browserRecorder) throw new Error("浏览器麦克风初始化失败");
     setOperationPending(true);
-    if (browserRecorder.isRecording) {
+    if (currentPhase === "recording") {
       statusMessage.textContent = "正在结束录音并识别问题";
-      const recording = await browserRecorder.stop();
-      await submitVerdictWav(new File(
-        [recording],
-        "verdict-question.wav",
-        { type: "audio/wav" },
-      ));
+      const response = await request("/api/device/verdict/recording/stop", { method: "POST" });
+      await renderVerdictState(await response.json());
     } else {
       clearResult();
-      await browserRecorder.start();
-      currentPhase = "recording";
-      phasePill.dataset.phase = "recording";
+      const response = await request("/api/device/verdict/recording/start", { method: "POST" });
+      const snapshot = await response.json();
+      serverVerdictModeActive = true;
+      currentPhase = snapshot.phase || "recording";
+      phasePill.dataset.phase = currentPhase;
       phase.textContent = "录音";
-      statusMessage.textContent = "正在使用本机浏览器麦克风录音";
+      statusMessage.textContent = "正在使用树莓派麦克风录音";
     }
   } catch (error) {
-    await browserRecorder?.cancel();
     failVerdictSimulation();
     showError(error);
   } finally {
@@ -1512,6 +1508,10 @@ async function runDialogueShortPress() {
       await refreshMetrics();
     } else {
       clearResult();
+      if (serverVerdictModeActive) {
+        await request("/api/device/verdict/leave", { method: "POST" });
+        serverVerdictModeActive = false;
+      }
       const response = await request("/api/device/recording/start", { method: "POST" });
       renderState(await response.json());
     }
@@ -1726,7 +1726,6 @@ document.addEventListener("visibilitychange", () => {
 
 window.addEventListener("pagehide", () => {
   stopAllPolling();
-  void browserRecorder?.cancel();
   servoSimulator?.destroy();
   servoSimulator = null;
   unifiedInput.cancel();

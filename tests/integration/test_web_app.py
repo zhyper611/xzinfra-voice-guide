@@ -255,8 +255,8 @@ def test_device_page_loads_press_gesture_before_page_script():
         html = client.get("/device-test").text
 
     assert html.index("press-gesture.js") < html.index("device-interaction.js")
-    assert html.index("device-interaction.js") < html.index("browser-recorder.js")
-    assert html.index("browser-recorder.js") < html.index("servo-simulator.js")
+    assert "browser-recorder.js" not in html
+    assert html.index("device-interaction.js") < html.index("servo-simulator.js")
     assert html.index("servo-simulator.js") < html.index("device-test.js")
 
 
@@ -442,9 +442,14 @@ def test_device_test_script_uses_protected_device_contract_without_persisting_ke
     assert "new AbortController()" in response.text
     assert "REQUEST_TIMEOUT_MS" in response.text
     assert "请求超时，请检查网络后重试" in response.text
-    assert "ShowroomBrowserRecorder.create()" in response.text
+    assert "ShowroomBrowserRecorder" not in response.text
     assert "ShowroomServoSimulator.bind(servoSimulatorRoot)" in response.text
     assert 'request("/api/device/verdict/turn"' in response.text
+    assert 'request("/api/device/verdict/recording/start"' in response.text
+    assert 'request("/api/device/verdict/recording/stop"' in response.text
+    assert 'request("/api/device/verdict/leave"' in response.text
+    assert "if (serverVerdictModeActive)" in response.text
+    assert "正在使用树莓派麦克风录音" in response.text
     assert "servoSimulator?.startThinking()" in response.text
     assert "servoSimulator.applySessionState(snapshot)" in response.text
     assert 'console.error("servo_simulator_initialization_failed"' in response.text
@@ -500,6 +505,8 @@ def test_device_test_styles_keep_knowledge_controls_stable_and_responsive():
     assert '@media (max-width: 599px)' in css
     assert ".wav-knowledge-actions {\n    grid-template-columns: 1fr;" in css
     assert "overflow-wrap: anywhere" in css
+    assert "left: calc(50% - 82px);" in css
+    assert "left: calc(50% - 62px);" in css
 
 
 def test_device_test_script_implements_knowledge_lease_and_resync_contract():
