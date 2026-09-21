@@ -48,12 +48,14 @@ async def test_decide_posts_one_question_to_xzkb_application(respx_mock):
     assert len(route.calls) == 1
     request = route.calls[0].request
     assert request.headers["Authorization"] == "Bearer secret-key"
-    assert json.loads(request.content) == {
-        "messages": [
-            {"role": "user", "content": "今天适合喝咖啡吗？"}
-        ],
-        "stream": False,
+    payload = json.loads(request.content)
+    assert payload["stream"] is False
+    assert payload["messages"][-1] == {
+        "role": "user",
+        "content": "今天适合喝咖啡吗？",
     }
+    assert payload["messages"][0]["role"] == "system"
+    assert "某人说的对吗/对不对" in payload["messages"][0]["content"]
     await client.aclose()
 
 

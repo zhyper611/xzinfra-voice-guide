@@ -14,6 +14,14 @@ from showroom_guide.verdict import (
 logger = logging.getLogger(__name__)
 
 
+_RETRIEVAL_GUIDANCE = (
+    "对于‘某人说的对吗/对不对’这类问题：先检索知识库；如果知识库中有"
+    "同一主体‘说的对’或‘说的不对’的明确陈述，即使问题没有复述具体言论，"
+    "也应把该陈述视为充分依据，并按陈述给出 yes 或 no，不得仅因省略言论内容"
+    "判为 invalid。"
+)
+
+
 class VerdictClient:
     def __init__(
         self,
@@ -42,6 +50,7 @@ class VerdictClient:
                 self._url,
                 json={
                     "messages": [
+                        {"role": "system", "content": _RETRIEVAL_GUIDANCE},
                         {"role": "user", "content": normalized},
                     ],
                     "stream": False,
