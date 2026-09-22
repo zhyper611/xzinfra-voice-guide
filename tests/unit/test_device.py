@@ -20,8 +20,11 @@ from showroom_guide.device import (
     inspect_wav,
     validate_wav,
 )
-from showroom_guide.models import GuidePhase, InteractionMode
+from showroom_guide.models import GuidePhase, InteractionMode, VerdictPhase
 from showroom_guide.state import GuideStateStore
+from showroom_guide.verdict import Verdict, VerdictBasis, VerdictDecision, VerdictScope
+from showroom_guide.verdict_motion import WebSimulationOutput
+from showroom_guide.verdict_workflow import VerdictWorkflow
 
 
 def make_wav(
@@ -67,6 +70,30 @@ class TrackingSpeech:
         return make_wav()
 
 
+class DeferredSpeech(TrackingSpeech):
+    def __init__(self, transcript: str) -> None:
+        super().__init__([transcript])
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def transcribe(self, audio) -> str:
+        self.transcribed_audio.append(audio.read())
+        self.started.set()
+        await self.release.wait()
+        return self.transcripts.pop(0)
+
+
+class StaticVerdictClient:
+    async def decide(self, _question):
+        return VerdictDecision.mixed(
+            scope=VerdictScope.EXHIBITION,
+            verdict=Verdict.YES,
+            basis=VerdictBasis.KNOWLEDGE_BASE,
+            reason="知识库明确支持",
+            evidence="支持国产算力适配",
+        )
+
+
 class TrackingStateStore(GuideStateStore):
     def __init__(self) -> None:
         super().__init__()
@@ -109,6 +136,7 @@ async def test_verdict_mode_uses_asr_without_dialogue_or_tts():
     await state.set_interaction_mode(InteractionMode.VERDICT)
     speech = TrackingSpeech(["这是国产芯片吗？"])
     verdict_workflow = AsyncMock()
+    verdict_workflow.start_thinking.return_value = 7
     session, _, xzkb, _ = make_session(
         speech=speech,
         state=state,
@@ -117,12 +145,143 @@ async def test_verdict_mode_uses_asr_without_dialogue_or_tts():
 
     result = await session.process_wav(make_wav())
 
-    verdict_workflow.run.assert_awaited_once_with("这是国产芯片吗？")
+    verdict_workflow.run.assert_awaited_once_with(
+        "这是国产芯片吗？",
+        thinking_generation=7,
+    )
     assert xzkb.messages == []
     assert speech.synthesized_text == []
     assert result.transcript == "这是国产芯片吗？"
     assert result.answer == ""
     assert result.audio_id is None
+
+
+@pytest.mark.asyncio
+async def test_verdict_motion_starts_before_asr_returns_text():
+    state = GuideStateStore()
+    await state.set_interaction_mode(InteractionMode.VERDICT)
+    speech = DeferredSpeech("这是国产芯片吗？")
+    verdict_workflow = VerdictWorkflow(
+        StaticVerdictClient(),
+        WebSimulationOutput(state),
+        state,
+    )
+    session, _, _, _ = make_session(
+        speech=speech,
+        state=state,
+        verdict_workflow=verdict_workflow,
+    )
+
+    processing = asyncio.create_task(session.process_wav(make_wav()))
+    await speech.started.wait()
+
+    try:
+        assert state.snapshot.phase is GuidePhase.TRANSCRIBING
+        assert state.snapshot.verdict_phase is VerdictPhase.THINKING
+    finally:
+        speech.release.set()
+        result = await processing
+    assert result.transcript == "这是国产芯片吗？"
+    assert state.snapshot.verdict_phase is VerdictPhase.HOLDING
+
+
+@pytest.mark.asyncio
+async def test_verdict_motion_returns_to_neutral_when_asr_detects_no_speech():
+    state = GuideStateStore()
+    await state.set_interaction_mode(InteractionMode.VERDICT)
+    verdict_workflow = VerdictWorkflow(
+        StaticVerdictClient(),
+        WebSimulationOutput(state),
+        state,
+    )
+    session, _, _, _ = make_session(
+        speech=TrackingSpeech(["   "]),
+        state=state,
+        verdict_workflow=verdict_workflow,
+    )
+
+    with pytest.raises(NoSpeechDetected, match=NO_SPEECH_MESSAGE):
+        await session.process_wav(make_wav())
+
+    assert state.snapshot.phase is GuidePhase.ERROR
+    assert state.snapshot.verdict_phase is VerdictPhase.IDLE
+    assert state.snapshot.verdict is Verdict.NEUTRAL
+
+
+@pytest.mark.asyncio
+async def test_verdict_motion_returns_to_neutral_when_asr_service_fails():
+    state = GuideStateStore()
+    await state.set_interaction_mode(InteractionMode.VERDICT)
+    speech = TrackingSpeech()
+    speech.transcribe = AsyncMock(side_effect=httpx.ReadTimeout("timeout"))
+    verdict_workflow = VerdictWorkflow(
+        StaticVerdictClient(),
+        WebSimulationOutput(state),
+        state,
+    )
+    session, _, _, _ = make_session(
+        speech=speech,
+        state=state,
+        verdict_workflow=verdict_workflow,
+    )
+
+    with pytest.raises(DeviceTranscriptionUnavailable):
+        await session.process_wav(make_wav())
+
+    assert state.snapshot.phase is GuidePhase.ERROR
+    assert state.snapshot.verdict_phase is VerdictPhase.IDLE
+    assert state.snapshot.verdict is Verdict.NEUTRAL
+
+
+@pytest.mark.asyncio
+async def test_verdict_motion_returns_to_neutral_when_asr_is_cancelled():
+    state = GuideStateStore()
+    await state.set_interaction_mode(InteractionMode.VERDICT)
+    speech = DeferredSpeech("这是国产芯片吗？")
+    verdict_workflow = VerdictWorkflow(
+        StaticVerdictClient(),
+        WebSimulationOutput(state),
+        state,
+    )
+    session, _, _, _ = make_session(
+        speech=speech,
+        state=state,
+        verdict_workflow=verdict_workflow,
+    )
+
+    processing = asyncio.create_task(session.process_wav(make_wav()))
+    await speech.started.wait()
+    processing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await processing
+
+    assert state.snapshot.verdict_phase is VerdictPhase.IDLE
+    assert state.snapshot.verdict is Verdict.NEUTRAL
+
+
+@pytest.mark.asyncio
+async def test_verdict_motion_returns_to_neutral_on_unexpected_asr_error():
+    state = GuideStateStore()
+    await state.set_interaction_mode(InteractionMode.VERDICT)
+    speech = TrackingSpeech()
+    speech.transcribe = AsyncMock(side_effect=RuntimeError("unexpected"))
+    verdict_workflow = VerdictWorkflow(
+        StaticVerdictClient(),
+        WebSimulationOutput(state),
+        state,
+    )
+    session, _, _, _ = make_session(
+        speech=speech,
+        state=state,
+        verdict_workflow=verdict_workflow,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        await session.process_wav(make_wav())
+
+    assert state.snapshot.verdict_phase is VerdictPhase.IDLE
+    assert state.snapshot.verdict is Verdict.NEUTRAL
 
 
 @pytest.mark.parametrize(

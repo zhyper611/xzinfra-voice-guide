@@ -180,11 +180,21 @@ class DeviceVoiceSession:
                 raise InvalidDeviceAudio("设备当前没有正在进行的录音")
             await self._state.transition(GuidePhase.TRANSCRIBING)
             await self._state.set_message("正在识别您的问题")
+            verdict_mode = (
+                self._state.snapshot.interaction_mode is InteractionMode.VERDICT
+            )
+            thinking_generation = None
+            if verdict_mode:
+                if self._verdict_workflow is None:
+                    raise RuntimeError("是非判断模式未配置")
+                thinking_generation = await self._verdict_workflow.start_thinking()
+            transcription_completed = False
             timing.start_asr()
             try:
                 transcript = (await self._speech.transcribe(io.BytesIO(audio))).strip()
                 if not transcript:
                     raise NoSpeechDetected(NO_SPEECH_MESSAGE)
+                transcription_completed = True
             except (httpx.HTTPError, ValueError) as error:
                 timing.fail("asr", error)
                 await self._state.transition(GuidePhase.ERROR)
@@ -197,11 +207,18 @@ class DeviceVoiceSession:
                 raise
             finally:
                 timing.finish_asr()
+                if thinking_generation is not None and not transcription_completed:
+                    await asyncio.shield(
+                        self._verdict_workflow.cancel_thinking(
+                            thinking_generation,
+                        )
+                    )
             await self._state.set_transcript(transcript)
-            if self._state.snapshot.interaction_mode is InteractionMode.VERDICT:
-                if self._verdict_workflow is None:
-                    raise RuntimeError("是非判断模式未配置")
-                await self._verdict_workflow.run(transcript)
+            if verdict_mode:
+                await self._verdict_workflow.run(
+                    transcript,
+                    thinking_generation=thinking_generation,
+                )
                 return DeviceTurnResult(
                     transcript=transcript,
                     answer="",

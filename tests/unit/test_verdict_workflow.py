@@ -56,6 +56,18 @@ class FakeMotion:
         self.calls.append(("reset",))
 
 
+class DeferredThinkingMotion(FakeMotion):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def thinking(self, generation):
+        self.calls.append(("thinking", generation))
+        self.started.set()
+        await self.release.wait()
+
+
 def exhibition_yes():
     return VerdictDecision.mixed(
         scope=VerdictScope.EXHIBITION,
@@ -85,6 +97,60 @@ async def test_run_starts_thinking_calls_application_once_and_holds_yes():
     assert state.snapshot.phase is GuidePhase.IDLE
     assert state.snapshot.verdict_evidence == "支持国产算力适配"
     assert state.snapshot.answer == ""
+
+
+@pytest.mark.asyncio
+async def test_prestarted_thinking_is_reused_when_transcript_arrives():
+    state = GuideStateStore()
+    motion = FakeMotion()
+    workflow = VerdictWorkflow(FakeClient(exhibition_yes()), motion, state)
+
+    generation = await workflow.start_thinking()
+    await workflow.run(
+        "该产品支持国产算力吗？",
+        thinking_generation=generation,
+    )
+
+    assert motion.calls == [
+        ("thinking", 1),
+        ("show_verdict", Verdict.YES, 1),
+    ]
+    assert state.snapshot.verdict_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_thinking_cancellation_does_not_reset_a_new_generation():
+    motion = FakeMotion()
+    workflow = VerdictWorkflow(
+        FakeClient(exhibition_yes()),
+        motion,
+        GuideStateStore(),
+    )
+
+    first_generation = await workflow.start_thinking()
+    await workflow.cancel_thinking(first_generation)
+    second_generation = await workflow.start_thinking()
+    await workflow.cancel_thinking(first_generation)
+
+    assert second_generation > first_generation
+    assert motion.calls[-1] == ("thinking", second_generation)
+
+
+@pytest.mark.asyncio
+async def test_start_thinking_returns_its_generation_when_leave_interleaves():
+    motion = DeferredThinkingMotion()
+    workflow = VerdictWorkflow(
+        FakeClient(exhibition_yes()),
+        motion,
+        GuideStateStore(),
+    )
+
+    starting = asyncio.create_task(workflow.start_thinking())
+    await motion.started.wait()
+    await workflow.leave()
+    motion.release.set()
+
+    assert await starting == 1
 
 
 @pytest.mark.asyncio

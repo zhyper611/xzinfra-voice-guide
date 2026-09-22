@@ -69,6 +69,7 @@ class VerdictWorkflow:
         self._speech_timeout_seconds = speech_timeout_seconds
         self._clock = clock
         self._generation = 0
+        self._thinking_generation: int | None = None
         self._run_lock = asyncio.Lock()
 
     @property
@@ -81,24 +82,63 @@ class VerdictWorkflow:
 
     async def enter(self) -> None:
         self._generation += 1
+        self._thinking_generation = None
         await self._motion.reset()
         await self._state.set_interaction_mode(InteractionMode.VERDICT)
 
-    async def run(self, transcript: str) -> VerdictDecision:
+    async def start_thinking(self) -> int:
+        if self._thinking_generation is not None:
+            return self._thinking_generation
+        self._generation += 1
+        generation = self._generation
+        self._thinking_generation = generation
+        await self._motion.thinking(generation)
+        return generation
+
+    async def cancel_thinking(self, generation: int) -> bool:
+        if self._thinking_generation != generation:
+            return False
+        self._thinking_generation = None
+        self._generation += 1
+        await self._motion.reset()
+        return True
+
+    async def run(
+        self,
+        transcript: str,
+        *,
+        thinking_generation: int | None = None,
+    ) -> VerdictDecision:
         if self._run_lock.locked():
             raise VerdictInProgress("已有是非判断正在处理中")
         async with self._run_lock:
-            return await self._run(transcript)
+            return await self._run(
+                transcript,
+                thinking_generation=thinking_generation,
+            )
 
-    async def _run(self, transcript: str) -> VerdictDecision:
+    async def _run(
+        self,
+        transcript: str,
+        *,
+        thinking_generation: int | None,
+    ) -> VerdictDecision:
         question = transcript.strip()
         if not question:
             raise ValueError("transcript must not be empty")
-        self._generation += 1
-        generation = self._generation
+        prestarted = thinking_generation is not None
+        if thinking_generation is None:
+            self._generation += 1
+            generation = self._generation
+        else:
+            if self._thinking_generation != thinking_generation:
+                raise asyncio.CancelledError
+            generation = thinking_generation
+            self._thinking_generation = None
         started_at = self._clock()
         await self._state.begin_verdict(question, generation=generation)
-        await self._motion.thinking(generation)
+        if not prestarted:
+            await self._motion.thinking(generation)
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 decision = await self._client.decide(question)
@@ -134,6 +174,7 @@ class VerdictWorkflow:
 
     async def leave(self) -> None:
         self._generation += 1
+        self._thinking_generation = None
         await self._motion.reset()
         await self._state.set_verdict_motion(
             VerdictMotionEvent(
